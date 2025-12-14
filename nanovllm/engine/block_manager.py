@@ -70,12 +70,17 @@ class BlockManager:
                 block_id = self.free_block_ids[0]
                 block = self._allocate_block(block_id)
             else:
+                # Cache Hit + Block Still Used
                 seq.num_cached_tokens += self.block_size
                 if block_id in self.used_block_ids:
                     block = self.blocks[block_id]
                     block.ref_count += 1
                 else:
+                    # Cache Hit + Block Already Freed
+                    # When a block is deallocated
+                    # it is not removed from hash_to_block_id
                     block = self._allocate_block(block_id)
+            # If this block is full
             if h != -1:
                 block.update(h, token_ids)
                 self.hash_to_block_id[h] = block_id
@@ -91,16 +96,21 @@ class BlockManager:
         seq.block_table.clear()
 
     def can_append(self, seq: Sequence) -> bool:
+        # When the sequence length modulo `block_size` equals 1
+        # it means starting to fill a new block and need to allocate a new free block.
+        # Otherwise (remainder is 0 or other values), no new block is needed, always returns `True`.
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
 
     def may_append(self, seq: Sequence):
         block_table = seq.block_table
         last_block = self.blocks[block_table[-1]]
+        # just started to fill a new block
         if len(seq) % self.block_size == 1:
             assert last_block.hash != -1
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)
+        # just filled the last block
         elif len(seq) % self.block_size == 0:
             assert last_block.hash == -1
             token_ids = seq.block(seq.num_blocks-1)
