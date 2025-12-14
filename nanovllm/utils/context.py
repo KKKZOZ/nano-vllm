@@ -20,15 +20,43 @@ class Context:
     #     [0, 6, 7, 8],   # 序列 2: 使用物理块 0, 6, 7, 8
     # ])
     block_tables: torch.Tensor | None = None
+    # Precomputed ragged view for flashinfer
+    kv_indices: torch.Tensor | None = None
+    kv_indptr: torch.Tensor | None = None
+    kv_last_page_len: torch.Tensor | None = None
 
 _CONTEXT = Context()
 
 def get_context():
     return _CONTEXT
 
-def set_context(is_prefill, cu_seqlens_q=None, cu_seqlens_k=None, max_seqlen_q=0, max_seqlen_k=0, slot_mapping=None, context_lens=None, block_tables=None):
+def set_context(
+    is_prefill,
+    cu_seqlens_q=None,
+    cu_seqlens_k=None,
+    max_seqlen_q=0,
+    max_seqlen_k=0,
+    slot_mapping=None,
+    context_lens=None,
+    block_tables=None,
+    kv_indices=None,
+    kv_indptr=None,
+    kv_last_page_len=None,
+):
     global _CONTEXT
-    _CONTEXT = Context(is_prefill, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, context_lens, block_tables)
+    _CONTEXT = Context(
+        is_prefill,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        slot_mapping,
+        context_lens,
+        block_tables,
+        kv_indices,
+        kv_indptr,
+        kv_last_page_len,
+    )
 
 def reset_context():
     global _CONTEXT

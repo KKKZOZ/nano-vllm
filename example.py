@@ -1,18 +1,27 @@
 import os
+
 from nanovllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-4B/")
+    path = os.path.expanduser("~/huggingface/Qwen3-8B/")
     # tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    llm = LLM(
+        path,
+        enforce_eager=True,
+        tensor_parallel_size=1,
+        block_size=4,
+    )
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=1024)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=200)
 
-    with open("prompts.txt", "r") as prompt_file:
-        prompts = prompt_file.readlines()
-    prompts = [prompt.strip() for prompt in prompts]
+    prompts = ["what is qwen3?"]
+
+    # with open("prompts.txt", "r") as prompt_file:
+    #     prompts = prompt_file.readlines()
+    # prompts = [prompt.strip() for prompt in prompts]
+
     # prompts = [
     #     tokenizer.apply_chat_template(
     #         [{"role": "user", "content": prompt}],

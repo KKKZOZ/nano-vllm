@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass
 from transformers import AutoConfig
 
+USE_FLASH_INFER = True
+
 
 @dataclass
 class Config:
@@ -14,7 +16,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
-    kvcache_block_size: int = 16
+    block_size: int = 16
     num_kvcache_blocks: int = -1
     decode_window_blocks: int | None = None
 
@@ -30,7 +32,20 @@ class Config:
         self.decode_window_blocks = 4
         if self.decode_window_blocks is not None:
             assert self.decode_window_blocks > 0
-            max_blocks = (
-                self.max_model_len + self.kvcache_block_size - 1
-            ) // self.kvcache_block_size
+            max_blocks = (self.max_model_len + self.block_size - 1) // self.block_size
             assert self.decode_window_blocks <= max_blocks
+
+
+_global_config: Config | None = None
+
+
+def init_config(model: str, **kwargs) -> Config:
+    global _global_config
+    _global_config = Config(model=model, **kwargs)
+    return _global_config
+
+
+def get_config() -> Config:
+    if _global_config is None:
+        raise RuntimeError("Config not initialized. Call init_config() first.")
+    return _global_config

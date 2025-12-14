@@ -8,6 +8,8 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
+from nanovllm.layers.attention import convert_block_table_to_ragged
+from nanovllm.utils.logger import logger
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
@@ -16,7 +18,7 @@ class ModelRunner:
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config
         hf_config = config.hf_config
-        self.block_size = config.kvcache_block_size
+        self.block_size = config.block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
         self.rank = rank
@@ -110,6 +112,11 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        reserved = int(total * config.gpu_memory_utilization - used - peak + current)
+        logger.info(
+            f"GPU memory total: {total / 2**30:.2f} GB, used: {used / 2**30:.2f} GB, peak: {peak / 2**30:.2f} GB, current: {current / 2**30:.2f} GB, reserved for KV blocks: {reserved / 2**30:.2f} GB"
+        )
+
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(
             hf_config,
@@ -124,11 +131,11 @@ class ModelRunner:
             * head_dim
             * hf_config.torch_dtype.itemsize
         )
-        config.num_kvcache_blocks = (
-            int(total * config.gpu_memory_utilization - used - peak + current)
-            // block_bytes
-        )
+        config.num_kvcache_blocks = reserved // block_bytes
         assert config.num_kvcache_blocks > 0
+        logger.info(
+            f"Block_bytes: {block_bytes} Allocated {config.num_kvcache_blocks} KV cache blocks(in a layer)."
+        )
         self.kv_cache = torch.empty(
             2,
             hf_config.num_hidden_layers,
@@ -142,6 +149,8 @@ class ModelRunner:
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
+                if hasattr(module, "kv_cache"):
+                    module.kv_cache = self.kv_cache[:, layer_id]
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence], max_blocks: int | None = None):
@@ -221,20 +230,54 @@ class ModelRunner:
         )
         return input_ids, positions
 
+    # def prepare_decode(self, seqs: list[Sequence]):
+    #     input_ids = []
+    #     positions = []
+    #     slot_mapping = []
+    #     context_lens = []
+    #     window = self.config.decode_window_blocks
+    #     for seq in seqs:
+    #         input_ids.append(seq.last_token)
+    #         positions.append(len(seq) - 1)
+    #         dropped_blocks = 0
+    #         if window is not None and len(seq.block_table) > window:
+    #             dropped_blocks = len(seq.block_table) - window
+    #         visible_len = len(seq) - dropped_blocks * self.block_size
+    #         context_lens.append(visible_len)
+    #         slot_mapping.append(
+    #             seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+    #         )
+    #     input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
+    #         non_blocking=True
+    #     )
+    #     positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(
+    #         non_blocking=True
+    #     )
+    #     slot_mapping = torch.tensor(
+    #         slot_mapping, dtype=torch.int32, pin_memory=True
+    #     ).cuda(non_blocking=True)
+    #     context_lens = torch.tensor(
+    #         context_lens, dtype=torch.int32, pin_memory=True
+    #     ).cuda(non_blocking=True)
+    #     block_tables = self.prepare_block_tables(seqs, window)
+
+    #     set_context(
+    #         False,
+    #         slot_mapping=slot_mapping,
+    #         context_lens=context_lens,
+    #         block_tables=block_tables,
+    #     )
+    #     return input_ids, positions
+
     def prepare_decode(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
         slot_mapping = []
         context_lens = []
-        window = self.config.decode_window_blocks
         for seq in seqs:
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
-            dropped_blocks = 0
-            if window is not None and len(seq.block_table) > window:
-                dropped_blocks = len(seq.block_table) - window
-            visible_len = len(seq) - dropped_blocks * self.block_size
-            context_lens.append(visible_len)
+            context_lens.append(len(seq))
             slot_mapping.append(
                 seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
             )
@@ -250,13 +293,18 @@ class ModelRunner:
         context_lens = torch.tensor(
             context_lens, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs, window)
-
+        block_tables = self.prepare_block_tables(seqs)
+        kv_indices, kv_indptr, kv_last_page_len = convert_block_table_to_ragged(
+            block_tables, context_lens, self.block_size
+        )
         set_context(
             False,
             slot_mapping=slot_mapping,
             context_lens=context_lens,
             block_tables=block_tables,
+            kv_indices=kv_indices,
+            kv_indptr=kv_indptr,
+            kv_last_page_len=kv_last_page_len,
         )
         return input_ids, positions
 
@@ -325,11 +373,17 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
+            kv_indices, kv_indptr, kv_last_page_len = convert_block_table_to_ragged(
+                block_tables[:bs], context_lens[:bs], self.block_size
+            )
             set_context(
                 False,
                 slot_mapping=slot_mapping[:bs],
                 context_lens=context_lens[:bs],
                 block_tables=block_tables[:bs],
+                kv_indices=kv_indices,
+                kv_indptr=kv_indptr,
+                kv_last_page_len=kv_last_page_len,
             )
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])  # warmup
             with torch.cuda.graph(graph, self.graph_pool):
