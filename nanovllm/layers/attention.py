@@ -242,14 +242,6 @@ class Attention(nn.Module):
 
                 o = prefill_wrapper_ragged.run(q, k, v)
         else:  # decode
-            # # Reuse pre-stacked KV cache view to avoid per-step copies
-            # if self._kv_cache_view is None:
-            #     if self.kv_cache is not None:
-            #         self._kv_cache_view = self.kv_cache.permute(1, 0, 2, 3, 4)
-            #     else:
-            #         self._kv_cache_view = torch.stack([k_cache, v_cache], dim=1)
-            # kv_cache = self._kv_cache_view
-
             kv_cache = (k_cache, v_cache)
 
             # Decode-side ragged indices are shared across layers; compute once if missing
@@ -329,32 +321,20 @@ def convert_block_table_to_ragged(block_table, seq_lens, block_size):
         return None, None, None
 
     batch_size = block_table.shape[0]
-    device = block_table.device
-
-    # Convert seq_lens to CPU for iteration (if not already)
-    # During CUDA graph capture, we need to avoid .item() on GPU tensors
-    if torch.is_tensor(seq_lens) and seq_lens.is_cuda:
-        seq_lens_cpu = seq_lens.cpu()
-    else:
-        seq_lens_cpu = seq_lens
 
     kv_indices_list = []
     kv_indptr = [0]
     kv_last_page_len = []
 
     for i in range(batch_size):
-        seq_len = (
-            seq_lens_cpu[i].item()
-            if torch.is_tensor(seq_lens_cpu[i])
-            else seq_lens_cpu[i]
-        )
+        seq_len = seq_lens[i].item()
 
-        if seq_len <= 0:
-            kv_last_page_len.append(0)
-            kv_indptr.append(
-                kv_indptr[-1]
-            )  # Keep indptr in sync even for empty sequences
-            continue
+        # if seq_len <= 0:
+        #     kv_last_page_len.append(0)
+        #     kv_indptr.append(
+        #         kv_indptr[-1]
+        #     )  # Keep indptr in sync even for empty sequences
+        #     continue
 
         num_blocks = (seq_len + block_size - 1) // block_size
         blocks = block_table[i, :num_blocks]
