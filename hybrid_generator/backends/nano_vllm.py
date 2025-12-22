@@ -15,7 +15,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.logger import logger
 
 
-class Backend:
+class NanovLLMBackend(ModelBackend):
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}

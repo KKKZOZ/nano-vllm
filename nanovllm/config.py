@@ -2,15 +2,16 @@ import os
 from dataclasses import dataclass
 
 from transformers import AutoConfig
+from nanovllm.utils.logger import logger
 
 
 @dataclass
 class Config:
     model: str
-    max_num_batched_tokens: int = 16384
+    max_num_batched_tokens: int = 40960
     max_num_seqs: int = 512
-    max_model_len: int = 4096
-    gpu_memory_utilization: float = 0.9
+    max_model_len: int = 40960
+    gpu_memory_utilization: float = 0.4
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
@@ -19,6 +20,7 @@ class Config:
     num_kvcache_blocks: int = -1
 
     def __post_init__(self):
+        logger.info("GPU Memory Utilization: %.2f", self.gpu_memory_utilization)
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8

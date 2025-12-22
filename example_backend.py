@@ -25,6 +25,7 @@ def main():
     prompt_ids = tokenizer.encode(prompt)
 
     print(tokenizer.encode("请用中文回复"))
+    seq_id = 123
 
     temperature = torch.tensor(
         [sampling_params.temperature], dtype=torch.float32, pin_memory=True
@@ -34,7 +35,7 @@ def main():
 
     output_ids = []
 
-    logits, seq_id = llm.generate_v1(None, prompt_ids)
+    logits, seq_id = llm.generate_v1(seq_id, prompt_ids)
 
     token_id = sampler(logits, temperature).item()
     output_ids.append(token_id)
