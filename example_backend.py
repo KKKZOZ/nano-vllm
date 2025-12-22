@@ -1,11 +1,13 @@
-import time
-import torch
 import os
-from nanovllm import LLM, SamplingParams
+import time
+
+import torch
+from transformers import AutoTokenizer
+
+from nanovllm import SamplingParams
 from nanovllm.backend import Backend
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.logger import logger
-from transformers import AutoTokenizer
 
 
 def main():

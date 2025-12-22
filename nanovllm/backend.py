@@ -1,16 +1,17 @@
-import torch
-import time
 import atexit
+import time
 from dataclasses import fields
-from transformers import AutoTokenizer
+
+import torch
 import torch.multiprocessing as mp
+from transformers import AutoTokenizer
 
 from nanovllm.config import Config
-from nanovllm.sampling_params import SamplingParams
-from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.engine.model_runner import ModelRunner
-from nanovllm.utils.logger import logger
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.sequence import Sequence, SequenceStatus
+from nanovllm.sampling_params import SamplingParams
+from nanovllm.utils.logger import logger
 
 
 class Backend:
