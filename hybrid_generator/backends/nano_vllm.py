@@ -6,6 +6,7 @@ import torch
 import torch.multiprocessing as mp
 from transformers import AutoTokenizer
 
+from hybrid_generator.backends.base import ModelBackend
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.model_runner import ModelRunner
@@ -14,7 +15,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.logger import logger
 
 
-class Backend:
+class NanovLLMBackend(ModelBackend):
     def __init__(self, model, **kwargs):
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
@@ -48,11 +49,11 @@ class Backend:
         for p in self.ps:
             p.join()
 
-    def generate_v1(
+    def forward(
         self,
         seq_id: int,
         token_ids: list[int],
-    ) -> tuple[torch.Tensor, int]:
+    ) -> torch.Tensor:
         is_prefill = False
         is_extend = False
 
@@ -78,14 +79,16 @@ class Backend:
                     self.block_manager.may_append(seq)
                 seq.num_cached_tokens = old_num_tokens
                 is_extend = True
-                logger.debug("Running an extend operation")
 
         logits = self.model_runner.call("run", [seq], is_prefill, is_extend, False)
-        return logits, seq.seq_id
+        return logits
 
-    def free_sequence(self, seq_id: int):
+    def free(self, seq_id: int):
         seq = self.seq_map.pop(seq_id)
         self.block_manager.deallocate(seq)
+
+    def rollback(self, seq_id: int, target_len: int):
+        pass
 
     def generate_v0(
         self,

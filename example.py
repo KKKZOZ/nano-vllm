@@ -6,11 +6,11 @@ from nanovllm import LLM, SamplingParams
 
 
 def main():
-    path = os.path.expanduser("~/huggingface/Qwen3-8B/")
+    path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=False, tensor_parallel_size=1)
+    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=300)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=1000)
     prompts = [
         "introduce yourself",
     ]
@@ -28,7 +28,7 @@ def main():
         print("\n")
         print(f"Prompt: {prompt!r}")
         print(f"Completion: {output['text']!r}")
-        print(f"Token ids: {output['token_ids']}")
+        # print(f"Token ids: {output['token_ids']}")
 
 
 if __name__ == "__main__":

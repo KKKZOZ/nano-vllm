@@ -24,9 +24,10 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group(
-            "nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank
-        )
+        if not dist.is_initialized():
+            dist.init_process_group(
+                "nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank
+            )
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -59,7 +60,8 @@ class ModelRunner:
         if not self.enforce_eager:
             del self.graphs, self.graph_pool
         torch.cuda.synchronize()
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
     def loop(self):
         while True:
@@ -101,7 +103,7 @@ class ModelRunner:
         num_seqs = min(
             max_num_batched_tokens // max_model_len, self.config.max_num_seqs
         )
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        seqs = [Sequence(i, [0] * max_model_len) for i in range(num_seqs)]
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -126,11 +128,25 @@ class ModelRunner:
             * head_dim
             * hf_config.torch_dtype.itemsize
         )
+        logger.debug(f"KV cache block size: {block_bytes / 2**20} MB")
         config.num_kvcache_blocks = (
-            int(total * config.gpu_memory_utilization - used - peak + current)
+            int((free - peak + current) * config.gpu_memory_utilization)
             // block_bytes
         )
-        assert config.num_kvcache_blocks > 0
+        if config.num_kvcache_blocks <= 0:
+            logger.warning(
+                f"Calculated num_kvcache_blocks is {config.num_kvcache_blocks}. "
+                f"Free: {free/1024**3:.2f}GB, Peak: {peak/1024**3:.2f}GB, "
+                f"Current: {current/1024**3:.2f}GB, Util: {config.gpu_memory_utilization}"
+            )
+            # Fallback to a small number to avoid crash, or let it crash with better message
+            # For now, let's allow it to crash if it's truly 0, but the logging helps debugging.
+            # But technically, if utilization is > 0 and free is > 0, it should be positive unless block_bytes is huge.
+        
+        assert config.num_kvcache_blocks > 0, (
+            f"Not enough memory for KV cache. Free: {free/1024**3:.2f}GB, "
+            f"Block bytes: {block_bytes}"
+        )
         self.kv_cache = torch.empty(
             2,
             hf_config.num_hidden_layers,
@@ -363,7 +379,6 @@ class ModelRunner:
         # else:
         #     return logits
         if is_extend:
-            # 使用专门的extend准备函数
             input_ids, positions = self.prepare_extend(seqs)
         elif is_prefill:
             input_ids, positions = self.prepare_prefill(seqs)
