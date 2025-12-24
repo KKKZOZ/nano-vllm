@@ -1,7 +1,9 @@
 import random
 import time
+
 import matplotlib.pyplot as plt
 import torch
+
 from nanovllm.backend import Backend
 
 
@@ -97,7 +99,7 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
 
     plt.tight_layout()
     plt.savefig("forward_performance.png", dpi=150, bbox_inches="tight")
-    print(f"\nPlot saved to: forward_performance.png")
+    print("\nPlot saved to: forward_performance.png")
 
     # Also create a per-token time plot
     plt.figure(figsize=(10, 6))
@@ -133,7 +135,7 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
 
     plt.tight_layout()
     plt.savefig("forward_performance_per_token.png", dpi=150, bbox_inches="tight")
-    print(f"Per-token plot saved to: forward_performance_per_token.png")
+    print("Per-token plot saved to: forward_performance_per_token.png")
 
     # Print summary
     print("\n" + "=" * 60)
@@ -147,7 +149,6 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
 
 
 if __name__ == "__main__":
-    import sys
 
     model = "/root/huggingface/Qwen3-8B"
     test_forward_performance(model)

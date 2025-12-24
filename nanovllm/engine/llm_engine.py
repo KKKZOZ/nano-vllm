@@ -4,7 +4,6 @@ from time import perf_counter
 
 import torch.multiprocessing as mp
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
 
 from nanovllm.config import Config
 from nanovllm.engine.model_runner import ModelRunner
@@ -12,6 +11,7 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.sequence import Sequence
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.logger import logger
+from transformers import AutoTokenizer
 
 
 class LLMEngine:

@@ -1,8 +1,8 @@
 import os
 from dataclasses import dataclass
 
-from transformers import AutoConfig
 from nanovllm.utils.logger import logger
+from transformers import AutoConfig
 
 
 @dataclass

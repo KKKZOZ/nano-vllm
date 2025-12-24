@@ -10,10 +10,9 @@ import time
 from typing import Literal
 
 import torch
-from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
 
-from hybrid_generator.backends import HFBackend, NanovLLMBackend
+from hybrid_generator.backends import NanovLLMBackend
 from hybrid_generator.profiling import ProfileResult
 from hybrid_generator.strategies import (
     EntropyStrategy,
@@ -22,6 +21,7 @@ from hybrid_generator.strategies import (
     compute_logu,
     sample_token,
 )
+from transformers import AutoTokenizer
 
 
 class HybridGenerator:
@@ -425,7 +425,7 @@ class HybridGenerator:
 
             # Print token (with indicator for which model was used) if verbose mode is enabled
             if self.verbose:
-                indicator = "🔵" if model_used == "llm" else "🟢"
+                # indicator = "🔵" if model_used == "llm" else "🟢"
                 print(f"{token_text}", end="", flush=True)
 
             if token_id in eos_token_ids:

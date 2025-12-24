@@ -13,9 +13,9 @@ import torch
 import torch.nn.functional as F
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicCache
 
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .generator import HybridGenerator
 
@@ -462,7 +462,7 @@ class HybridLM(LM):
         # Select model based on use_slm_only and availability
         llm_available = getattr(self.generator, "llm", None) is not None
         use_slm = self.use_slm_only or not llm_available
-        model_name = "slm" if use_slm else "llm"
+        # model_name = "slm" if use_slm else "llm"
         model = self.generator.slm if use_slm else self.generator.llm
 
         # Tokenize context

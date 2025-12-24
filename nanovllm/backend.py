@@ -4,15 +4,14 @@ from dataclasses import fields
 
 import torch
 import torch.multiprocessing as mp
-from transformers import AutoTokenizer
 
-from hybrid_generator.backends.base import ModelBackend
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.logger import logger
+from transformers import AutoTokenizer
 
 
 class Backend:

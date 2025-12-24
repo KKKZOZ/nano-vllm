@@ -12,8 +12,9 @@ from typing import Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
 from transformers.cache_utils import DynamicCache
+
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def sample_token(

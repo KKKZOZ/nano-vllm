@@ -1,6 +1,5 @@
 import random
 import time
-import uuid
 from typing import Tuple, cast
 
 import torch
@@ -10,7 +9,6 @@ from hybrid_generator.strategies.base import GenerationStrategy
 from hybrid_generator.strategies.metrics import LiveMetricsTracker
 from hybrid_generator.strategies.utils import (
     calculate_token_entropy,
-    compute_logu,
     sample_token,
 )
 

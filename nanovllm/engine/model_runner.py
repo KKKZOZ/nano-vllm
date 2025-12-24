@@ -29,7 +29,10 @@ class ModelRunner:
             # Allow port configuration via environment variable to support multiple instances
             master_port = os.environ.get("MASTER_PORT", "2333")
             dist.init_process_group(
-                "nccl", f"tcp://localhost:{master_port}", world_size=self.world_size, rank=rank
+                "nccl",
+                f"tcp://localhost:{master_port}",
+                world_size=self.world_size,
+                rank=rank,
             )
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
@@ -114,7 +117,7 @@ class ModelRunner:
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
-        used = total - free
+        # used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
@@ -133,21 +136,20 @@ class ModelRunner:
         )
         logger.debug(f"KV cache block size: {block_bytes / 2**20} MB")
         config.num_kvcache_blocks = (
-            int((free - peak + current) * config.gpu_memory_utilization)
-            // block_bytes
+            int((free - peak + current) * config.gpu_memory_utilization) // block_bytes
         )
         if config.num_kvcache_blocks <= 0:
             logger.warning(
                 f"Calculated num_kvcache_blocks is {config.num_kvcache_blocks}. "
-                f"Free: {free/1024**3:.2f}GB, Peak: {peak/1024**3:.2f}GB, "
-                f"Current: {current/1024**3:.2f}GB, Util: {config.gpu_memory_utilization}"
+                f"Free: {free / 1024**3:.2f}GB, Peak: {peak / 1024**3:.2f}GB, "
+                f"Current: {current / 1024**3:.2f}GB, Util: {config.gpu_memory_utilization}"
             )
             # Fallback to a small number to avoid crash, or let it crash with better message
             # For now, let's allow it to crash if it's truly 0, but the logging helps debugging.
             # But technically, if utilization is > 0 and free is > 0, it should be positive unless block_bytes is huge.
-        
+
         assert config.num_kvcache_blocks > 0, (
-            f"Not enough memory for KV cache. Free: {free/1024**3:.2f}GB, "
+            f"Not enough memory for KV cache. Free: {free / 1024**3:.2f}GB, "
             f"Block bytes: {block_bytes}"
         )
         self.kv_cache = torch.empty(

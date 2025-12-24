@@ -39,22 +39,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add the parent directory to Python path to allow package imports
-script_dir = Path(__file__).resolve().parent
-parent_dir = script_dir.parent
-if str(parent_dir) not in sys.path:
-    sys.path.insert(0, str(parent_dir))
-
-try:
-    from lm_eval import evaluator, tasks
-    from lm_eval.api.registry import MODEL_REGISTRY
-except ImportError:
-    print("ERROR: lm-evaluation-harness not installed.")
-    print("Install with: pip install lm-eval")
-    sys.exit(1)
-
+from lm_eval import evaluator
 
 from hybrid_generator.lm_eval_wrapper import HybridLM
+
+# Add the parent directory to Python path to allow package imports
+# script_dir = Path(__file__).resolve().parent
+# parent_dir = script_dir.parent
+# if str(parent_dir) not in sys.path:
+#     sys.path.insert(0, str(parent_dir))
 
 
 def parse_args():

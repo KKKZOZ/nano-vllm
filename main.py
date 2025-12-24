@@ -1,11 +1,11 @@
 import torch
-from transformers import AutoTokenizer, pipeline
 
 # from generate import (
 #     simple_generate,
 # )
 from hybrid_generator import HybridGenerator
 from hybrid_generator.strategies.utils import simple_generate
+from transformers import AutoTokenizer
 
 # prompt = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
 input = "write a simple calculator in python"

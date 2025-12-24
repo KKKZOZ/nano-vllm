@@ -1,10 +1,10 @@
-from typing import Dict, List
+from typing import Dict
 
 import torch
-from transformers import AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache  # Requires transformers >= 4.36
 
 from hybrid_generator.backends.base import ModelBackend
+from transformers import AutoModelForCausalLM
 
 
 class HFBackend(ModelBackend):
