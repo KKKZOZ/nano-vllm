@@ -6,6 +6,8 @@ import torch
 
 from nanovllm.backend import Backend
 
+from torch.profiler import profile, ProfilerActivity, record_function
+
 
 def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
     """
@@ -33,7 +35,19 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
 
     # Now test decode phase with different numbers of tokens
     # We'll test with: 1, 2, 4, 8, 16, 32, 64, 128, 256 tokens
-    token_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    # token_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    token_counts = [i for i in range(1, 10)] + [
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+    ]
     times = []
 
     print("\nTesting decode phase with different token counts...")
@@ -148,7 +162,44 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
     print("=" * 60)
 
 
-if __name__ == "__main__":
+def profile_with_pytorch_profiler(model_name: str):
+    backend = Backend(model_name, max_num_seqs=1)
+    seq_id = random.randint(0, 1000000)
+    prefill_tokens = list(range(1, 257))
+    backend.forward(seq_id, prefill_tokens)
 
+    decode_tokens = list(range(257, 258))
+
+    # Warmup
+    for _ in range(5):
+        backend.forward(seq_id, decode_tokens)
+
+    # Profile
+    with profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        with_stack=True,
+    ) as prof:
+        with record_function("forward_call"):
+            backend.forward(seq_id, decode_tokens)
+
+    # 打印结果
+    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+
+    # 导出 Chrome trace（可视化）
+    prof.export_chrome_trace("trace.json")
+    print("Trace saved to trace.json (open in chrome://tracing)")
+
+    # 统计 CPU time
+    cpu_time = sum([evt.cpu_time_total for evt in prof.key_averages()])
+    cuda_time = sum([evt.cuda_time_total for evt in prof.key_averages()])
+    print(f"\nTotal CPU time: {cpu_time / 1000:.3f}ms")
+    print(f"Total CUDA time: {cuda_time / 1000:.3f}ms")
+    print(f"CPU overhead: {(cpu_time - cuda_time) / 1000:.3f}ms")
+
+
+if __name__ == "__main__":
     model = "/root/huggingface/Qwen3-8B"
     test_forward_performance(model)
+    # profile_kernel_launch_overhead(model)
+    # profile_with_pytorch_profiler(model)

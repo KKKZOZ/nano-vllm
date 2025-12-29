@@ -1,15 +1,16 @@
+import json
+
 import torch
 
 # from generate import (
 #     simple_generate,
 # )
 from hybrid_generator import HybridGenerator
-from hybrid_generator.strategies.utils import simple_generate
 from transformers import AutoTokenizer
 
-# prompt = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
-input = "write a simple calculator in python"
-model = "/root/huggingface/Qwen3-32B"
+input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
+# input = "write a simple calculator in python"
+model = "/root/huggingface/Qwen3-8B"
 draft_model = "/root/huggingface/Qwen3-1.7B"
 
 messages = [
@@ -24,7 +25,7 @@ input = tokenizer.apply_chat_template(
     add_generation_prompt=True,
 )
 
-result = simple_generate("/root/huggingface/Qwen3-0.6B", input, max_new_tokens=1000)
+# result = simple_generate("/root/huggingface/Qwen3-0.6B", input, max_new_tokens=1000)
 
 # result = simple_generate("/root/huggingface/Qwen3-1.7B", input, max_new_tokens=1000)
 
@@ -109,6 +110,14 @@ def run_hybrid_generation(
     )
     print(f"Statatics: {stats}")
 
+    engine_stats = generator.report_backend_stats()
+    # print(f"Engine Backend Statistics: {engine_stats}")
+    print(
+        f"Engine Backend Statistics:\n{json.dumps(engine_stats['llm_stats'], indent=2, ensure_ascii=False)}"
+    )
+
+    print(result)
+
 
 def profile(prompt, draft_model, model):
     # Initialize the hybrid generator once
@@ -156,7 +165,7 @@ def profile(prompt, draft_model, model):
 
 
 if __name__ == "__main__":
-    # run_hybrid_generation(
-    #     input, draft_model, model, threshold=0.1, max_new_tokens=1000, verbose=False
-    # )
+    run_hybrid_generation(
+        input, draft_model, model, threshold=0.1, max_new_tokens=1000, verbose=False
+    )
     print("OK")

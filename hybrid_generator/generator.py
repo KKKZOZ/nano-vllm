@@ -456,3 +456,10 @@ class HybridGenerator:
         print(f"Speed: {len(profile.tokens) / max(profile.total_time, 1e-9):.2f} tok/s")
 
         return profile
+
+    def report_backend_stats(self) -> dict:
+        """Report statistics from both SLM and LLM backends."""
+        return {
+            "slm_stats": self.slm.report_stats(),
+            "llm_stats": self.llm.report_stats(),
+        }

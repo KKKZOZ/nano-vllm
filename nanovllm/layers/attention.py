@@ -45,7 +45,14 @@ def store_kvcache(
     assert k_cache.stride(1) == D and v_cache.stride(1) == D
     assert slot_mapping.numel() == N
     store_kvcache_kernel[(N,)](
-        key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D
+        key,
+        key.stride(0),
+        value,
+        value.stride(0),
+        k_cache,
+        v_cache,
+        slot_mapping,
+        D,  # ty:ignore[invalid-argument-type]
     )
 
 
@@ -69,7 +76,9 @@ class Attention(nn.Module):
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
-        if context.is_prefill:
+
+        # Use flash_attn_varlen_func only for true prefill (not extend)
+        if context.is_prefill and not context.is_extend:
             if context.block_tables is not None:  # prefix cache
                 k, v = k_cache, v_cache
             o = flash_attn_varlen_func(
@@ -84,9 +93,19 @@ class Attention(nn.Module):
                 causal=True,
                 block_table=context.block_tables,
             )
-        else:  # decode
+        else:  # decode or extend - both use flash_attn_with_kvcache
+            # Reshape q for flash_attn_with_kvcache:
+            # - decode: [batch_size, num_heads, head_dim] -> [batch_size, 1, num_heads, head_dim]
+            # - extend: [num_tokens, num_heads, head_dim] -> [1, num_tokens, num_heads, head_dim]
+            if context.is_extend:
+                # Extend: single sequence with multiple new tokens
+                q = q.unsqueeze(0)  # [1, num_tokens, num_heads, head_dim]
+            else:
+                # Decode: batch of sequences, each with 1 token
+                q = q.unsqueeze(1)  # [batch_size, 1, num_heads, head_dim]
+
             o = flash_attn_with_kvcache(
-                q.unsqueeze(1),
+                q,
                 k_cache,
                 v_cache,
                 cache_seqlens=context.context_lens,
@@ -94,4 +113,15 @@ class Attention(nn.Module):
                 softmax_scale=self.scale,
                 causal=True,
             )
+
+            # Reshape output back
+            if context.is_extend:
+                o = o.squeeze(
+                    0
+                )  # [1, num_tokens, num_heads, head_dim] -> [num_tokens, num_heads, head_dim]
+            else:
+                o = o.squeeze(
+                    1
+                )  # [batch_size, 1, num_heads, head_dim] -> [batch_size, num_heads, head_dim]
+
         return o

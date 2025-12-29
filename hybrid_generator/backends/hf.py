@@ -47,3 +47,6 @@ class HFBackend(ModelBackend):
     def free(self, seq_id: int):
         if seq_id in self.cache_map:
             del self.cache_map[seq_id]
+
+    def report_stats(self) -> dict:
+        return {}

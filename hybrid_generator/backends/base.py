@@ -57,3 +57,8 @@ class ModelBackend(ABC):
     def free(self, seq_id: int):
         """Releases resources associated with the request ID."""
         pass
+
+    @abstractmethod
+    def report_stats(self) -> dict:
+        """Returns a dictionary of backend-specific statistics."""
+        pass

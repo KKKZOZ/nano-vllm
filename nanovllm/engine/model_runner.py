@@ -65,6 +65,8 @@ class ModelRunner:
                 self.shm.unlink()
         if not self.enforce_eager:
             del self.graphs, self.graph_pool
+            if self.config.enable_extend_cudagraph and self.extend_graphs:
+                del self.extend_graphs, self.extend_graph_vars
         torch.cuda.synchronize()
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -270,42 +272,29 @@ class ModelRunner:
     def prepare_extend(self, seqs: list[Sequence]):
         """
         Prepare for extend operation where we append multiple tokens to existing sequences.
-        Similar to prefill but only processes newly added tokens.
+        Uses flash_attn_with_kvcache interface (similar to decode).
         """
         input_ids = []
         positions = []
-        cu_seqlens_q = [0]
-        cu_seqlens_k = [0]
-        max_seqlen_q = 0
-        max_seqlen_k = 0
         slot_mapping = []
-        block_tables = None
+        context_lens = []
 
         for seq in seqs:
             seqlen = len(seq)
-            # 只处理新增的tokens (从 num_cached_tokens 开始)
+            # Process newly added tokens (from num_cached_tokens onwards)
             input_ids.extend(seq[seq.num_cached_tokens :])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
-            cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
-            cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
-            max_seqlen_q = max(seqlen_q, max_seqlen_q)
-            max_seqlen_k = max(seqlen_k, max_seqlen_k)
+            context_lens.append(seqlen)  # Total sequence length (existing + new)
 
             if not seq.block_table:  # warmup
                 continue
 
-            # 关键区别：逐个token生成slot_mapping，而不是按block
+            # Generate slot_mapping for each new token
             for token_pos in range(seq.num_cached_tokens, seqlen):
                 block_idx = token_pos // self.block_size
                 in_block_offset = token_pos % self.block_size
                 slot = seq.block_table[block_idx] * self.block_size + in_block_offset
                 slot_mapping.append(slot)
-
-        # 检查是否有prefix cache (这种情况下extend不太可能发生，但保持一致)
-        if cu_seqlens_k[-1] > cu_seqlens_q[-1]:
-            block_tables = self.prepare_block_tables(seqs)
 
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
@@ -313,24 +302,21 @@ class ModelRunner:
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(
             non_blocking=True
         )
-        cu_seqlens_q = torch.tensor(
-            cu_seqlens_q, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
-        cu_seqlens_k = torch.tensor(
-            cu_seqlens_k, dtype=torch.int32, pin_memory=True
-        ).cuda(non_blocking=True)
         slot_mapping = torch.tensor(
             slot_mapping, dtype=torch.int32, pin_memory=True
         ).cuda(non_blocking=True)
+        context_lens = torch.tensor(
+            context_lens, dtype=torch.int32, pin_memory=True
+        ).cuda(non_blocking=True)
+        block_tables = self.prepare_block_tables(seqs)
+
+        # Set context for flash_attn_with_kvcache (similar to decode)
         set_context(
-            True,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            slot_mapping,
-            None,
-            block_tables,
+            False,  # is_prefill=False to use flash_attn_with_kvcache path
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            is_extend=True,  # Flag to distinguish from decode
         )
         return input_ids, positions
 
@@ -345,44 +331,61 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(
-        self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        is_prefill: bool,
+        is_extend=False,
     ):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        # Use eager mode for prefill
+        if is_prefill or self.enforce_eager:
             return self.model.compute_logits(self.model(input_ids, positions))
-        else:
-            bs = input_ids.size(0)
-            context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"].fill_(-1)
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"].zero_()
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, : context.block_tables.size(1)] = (
-                context.block_tables
-            )
-            graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+
+        # Extend: use CUDA graph if enabled and available
+        if is_extend and self.config.enable_extend_cudagraph:
+            num_tokens = input_ids.size(0)
+            if num_tokens in self.extend_graphs:
+                context = get_context()
+                extend_vars = self.extend_graph_vars
+
+                # Update graph input tensors
+                extend_vars["input_ids"][:num_tokens] = input_ids
+                extend_vars["positions"][:num_tokens] = positions
+                extend_vars["slot_mapping"][:num_tokens] = context.slot_mapping
+                extend_vars["context_lens"][:] = context.context_lens
+                extend_vars["block_tables"][:, : context.block_tables.size(1)] = (
+                    context.block_tables
+                )
+
+                # Replay graph
+                graph = self.extend_graphs[num_tokens]
+                graph.replay()
+                return self.model.compute_logits(extend_vars["outputs"][:num_tokens])
+
+        # Fallback to eager mode for extend if graph not available
+        if is_extend:
+            return self.model.compute_logits(self.model(input_ids, positions))
+
+        # Decode: use CUDA Graph for single-token generation
+        bs = input_ids.size(0)
+        context = get_context()
+        graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+        graph_vars = self.graph_vars
+        graph_vars["input_ids"][:bs] = input_ids
+        graph_vars["positions"][:bs] = positions
+        graph_vars["slot_mapping"].fill_(-1)
+        graph_vars["slot_mapping"][:bs] = context.slot_mapping
+        graph_vars["context_lens"].zero_()
+        graph_vars["context_lens"][:bs] = context.context_lens
+        graph_vars["block_tables"][:bs, : context.block_tables.size(1)] = (
+            context.block_tables
+        )
+        graph.replay()
+        return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(
         self, seqs: list[Sequence], is_prefill: bool, is_extend=False, do_sample=True
     ) -> list[int] | torch.Tensor:
-        # input_ids, positions = (
-        #     self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        # )
-        # temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        # logits = self.run_model(input_ids, positions, is_prefill)
-        # reset_context()
-        # if do_sample:
-        #     token_ids = (
-        #         self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
-        #     )
-        #     assert token_ids is not None
-        #     return token_ids
-        # else:
-        #     return logits
         if is_extend:
             input_ids, positions = self.prepare_extend(seqs)
         elif is_prefill:
@@ -391,8 +394,7 @@ class ModelRunner:
             input_ids, positions = self.prepare_decode(seqs)
 
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        # extend使用prefill模式的模型执行路径
-        logits = self.run_model(input_ids, positions, is_prefill or is_extend)
+        logits = self.run_model(input_ids, positions, is_prefill, is_extend)
         reset_context()
 
         if do_sample:
@@ -410,17 +412,20 @@ class ModelRunner:
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
+
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
+
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
         self.graph_pool = None
 
         logger.info(f"Capturing CUDA graphs for batch sizes: {self.graph_bs}")
+        # CUDA graph capture for decode
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
             set_context(
@@ -446,3 +451,59 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+
+        # CUDA graph capture for extend (using flash_attn_with_kvcache)
+        if config.enable_extend_cudagraph:
+            self.extend_graph_len = [i for i in range(1, 10)]
+            self.extend_graphs = {}
+            max_extend_len = max(self.extend_graph_len)
+
+            # Allocate tensors for extend graphs
+            extend_input_ids = torch.zeros(max_extend_len, dtype=torch.int64)
+            extend_positions = torch.zeros(max_extend_len, dtype=torch.int64)
+            extend_slot_mapping = torch.zeros(max_extend_len, dtype=torch.int32)
+            extend_context_lens = torch.zeros(1, dtype=torch.int32)
+            extend_block_tables = torch.zeros(1, max_num_blocks, dtype=torch.int32)
+            extend_outputs = torch.zeros(max_extend_len, hf_config.hidden_size)
+
+            logger.info(
+                f"Capturing CUDA graphs for extend lengths: {self.extend_graph_len}"
+            )
+            for length in reversed(self.extend_graph_len):
+                graph = torch.cuda.CUDAGraph()
+
+                # Set context for flash_attn_with_kvcache (similar to decode)
+                set_context(
+                    False,  # is_prefill=False to use flash_attn_with_kvcache
+                    slot_mapping=extend_slot_mapping[:length],
+                    context_lens=extend_context_lens,
+                    block_tables=extend_block_tables,
+                    is_extend=True,
+                )
+
+                # Warmup
+                extend_outputs[:length] = self.model(
+                    extend_input_ids[:length], extend_positions[:length]
+                )
+
+                # Capture
+                with torch.cuda.graph(graph, self.graph_pool):
+                    extend_outputs[:length] = self.model(
+                        extend_input_ids[:length], extend_positions[:length]
+                    )
+
+                self.extend_graphs[length] = graph
+                torch.cuda.synchronize()
+                reset_context()
+
+            self.extend_graph_vars = dict(
+                input_ids=extend_input_ids,
+                positions=extend_positions,
+                slot_mapping=extend_slot_mapping,
+                context_lens=extend_context_lens,
+                block_tables=extend_block_tables,
+                outputs=extend_outputs,
+            )
+        else:
+            self.extend_graphs = {}
+            self.extend_graph_len = []
