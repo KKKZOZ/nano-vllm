@@ -8,9 +8,9 @@ from nanovllm import LLM, SamplingParams
 def main():
     path = os.path.expanduser("~/huggingface/Qwen3-1.7B/")
     tokenizer = AutoTokenizer.from_pretrained(path)
-    llm = LLM(path, enforce_eager=False, tensor_parallel_size=1)
+    llm = LLM(path, enforce_eager=False, tensor_parallel_size=1, max_num_seqs=1)
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=1000)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=2000)
     prompts = [
         "introduce yourself",
     ]

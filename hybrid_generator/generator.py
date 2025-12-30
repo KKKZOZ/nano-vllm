@@ -6,12 +6,14 @@ different strategies that combine a small language model (SLM) with
 a large language model (LLM).
 """
 
+from hybrid_generator.strategies.utils import sample_token_optimized
+
+import random
 import time
-from typing import Literal
+from typing import Literal, cast
 
 import torch
 from transformers import AutoTokenizer
-from transformers.cache_utils import DynamicCache
 
 from hybrid_generator.backends import NanovLLMBackend
 from hybrid_generator.profiling import ProfileResult
@@ -51,8 +53,8 @@ class HybridGenerator:
 
     def __init__(
         self,
-        slm_model_id: str,
-        llm_model_id: str,
+        slm_model_id: str | None,
+        llm_model_id: str | None,
         slm_memory_usage: float = 0.4,
         llm_memory_usage: float = 0.4,
         device: str = "cuda",
@@ -78,36 +80,45 @@ class HybridGenerator:
         self.report_live_metrics = report_live_metrics
         self.enable_stats_sync = enable_stats_sync
 
-        # Load tokenizer (use LLM's tokenizer)
-        print(f"Loading tokenizer from {llm_model_id}")
-        self.tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
+        if slm_model_id is None and llm_model_id is None:
+            raise ValueError(
+                "At least one of slm_model_id or llm_model_id must be provided."
+            )
+
+        # Load tokenizer
+        if llm_model_id is not None:
+            print(f"Loading tokenizer from {llm_model_id}")
+            self.tokenizer = AutoTokenizer.from_pretrained(llm_model_id)
+        else:
+            print(f"Loading tokenizer from {slm_model_id}")
+            self.tokenizer = AutoTokenizer.from_pretrained(slm_model_id)
 
         # Load backend
-        print(f"Loading SLM: {slm_model_id}")
-        # self.slm = AutoModelForCausalLM.from_pretrained(
-        #     slm_model_id, torch_dtype=dtype
-        # ).to(device)
-        # self.slm.eval()
-        self.slm = NanovLLMBackend(
-            slm_model_id,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=slm_memory_usage,
-            enable_stats_sync=enable_stats_sync,
-        )
+        if slm_model_id is not None:
+            print(f"Loading SLM: {slm_model_id}")
+            self.slm = NanovLLMBackend(
+                slm_model_id,
+                device=device,
+                dtype=dtype,
+                gpu_memory_utilization=slm_memory_usage,
+                max_num_seqs=1,
+                enable_stats_sync=enable_stats_sync,
+            )
 
-        print(f"Loading LLM: {llm_model_id}")
-        # self.llm = AutoModelForCausalLM.from_pretrained(
-        #     llm_model_id, torch_dtype=dtype
-        # ).to(device)
-        # self.llm.eval()
-        self.llm = NanovLLMBackend(
-            llm_model_id,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=llm_memory_usage,
-            enable_stats_sync=enable_stats_sync,
-        )
+        if llm_model_id is not None:
+            print(f"Loading LLM: {llm_model_id}")
+            # self.llm = AutoModelForCausalLM.from_pretrained(
+            #     llm_model_id, torch_dtype=dtype
+            # ).to(device)
+            # self.llm.eval()
+            self.llm = NanovLLMBackend(
+                llm_model_id,
+                device=device,
+                dtype=dtype,
+                max_num_seqs=1,
+                gpu_memory_utilization=llm_memory_usage,
+                enable_stats_sync=enable_stats_sync,
+            )
 
         # Initialize strategies
         self.strategies = {
@@ -236,16 +247,12 @@ class HybridGenerator:
         top_k: int = 20,
         top_p: float = 0.95,
         min_p: float = 0.0,
-        # Routing parameters
-        threshold: float = 0.5,
-        routing_metric: Literal["uncertainty", "entropy"] = "uncertainty",
-        enable_routing: bool = False,
     ) -> ProfileResult:
         """
         Generate text with detailed profiling of each token.
 
-        This method generates text while recording detailed statistics for each token,
-        including uncertainty, entropy, and which model was used. The result includes
+        This method generates text using only the SLM while recording detailed statistics
+        for each token, including uncertainty and entropy. The result includes
         comprehensive analysis of the distribution of these metrics.
 
         Args:
@@ -255,74 +262,29 @@ class HybridGenerator:
             top_k: Top-k filtering
             top_p: Nucleus sampling threshold
             min_p: Minimum probability threshold
-            threshold: Threshold for routing (only used if enable_routing=True)
-            routing_metric: Metric to use for routing ("uncertainty" or "entropy")
-            enable_routing: Whether to enable routing between SLM and LLM
-                - False (default): Use only SLM for all tokens, profile SLM's complete
-                  uncertainty/entropy distribution. Best for finding optimal threshold.
-                - True: Use routing strategy, profile actual runtime behavior with
-                  the given threshold.
 
         Returns:
             ProfileResult object containing generated text and detailed statistics
 
-        Examples:
-            >>> # Profile SLM to find optimal threshold
-            >>> profile = generator.generate_with_profile(
-            ...     prompt="Explain quantum computing",
-            ...     max_new_tokens=500,
-            ...     enable_routing=False  # Only use SLM
-            ... )
-            >>> profile.print_summary()
-            >>> # If top 30% has uncertainty > 0.5, set threshold=0.5
-
-            >>> # Profile actual runtime with chosen threshold
-            >>> profile = generator.generate_with_profile(
-            ...     prompt="Explain quantum computing",
-            ...     max_new_tokens=100,
-            ...     threshold=0.5,
-            ...     routing_metric="uncertainty",
-            ...     enable_routing=True  # Use routing
-            ... )
         """
         # Initialize profiling result
-        mode = "slm_only" if not enable_routing else f"routed_{routing_metric}"
         profile = ProfileResult(
-            generated_text="", strategy=f"profiled_{mode}", total_time=0.0
+            generated_text="", strategy="profiled_slm_only", total_time=0.0
         )
 
-        # Initialize KV caches
-        slm_cache = DynamicCache(config=self.slm.config)
-        llm_cache = DynamicCache(config=self.llm.config) if enable_routing else None
-
-        # Prefill
+        # Prepare inputs
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        prompt_len = inputs["input_ids"].shape[1]
-        cache_position = torch.arange(prompt_len, device=self.device, dtype=torch.long)
-
-        # Prefill SLM (always needed)
-        _ = self.slm(
-            **inputs,
-            past_key_values=slm_cache,
-            use_cache=True,
-            cache_position=cache_position,
-        )
-
-        # Prefill LLM only if routing is enabled
-        if enable_routing:
-            _ = self.llm(
-                **inputs,
-                past_key_values=llm_cache,
-                use_cache=True,
-                cache_position=cache_position,
-            )
-
-        generated_ids = inputs["input_ids"]
-        offset = prompt_len
+        prompt_ids = inputs["input_ids"][0].tolist()
+        prompt_len = len(prompt_ids)
+        generated_ids = list(prompt_ids)
 
         eos_token_ids = (
             [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id else []
         )
+
+        # Initialize backend session
+        req_id = random.randint(0, 2**31 - 1)
+        slm_logits = self.slm.forward(req_id, prompt_ids)
 
         if self.enable_stats_sync and self.device.startswith("cuda"):
             torch.cuda.synchronize()
@@ -330,76 +292,26 @@ class HybridGenerator:
 
         # Statistics
         slm_tokens = 0
-        llm_tokens = 0
         decode_steps = 0
 
-        if enable_routing:
-            print(
-                f"Generating with profiling (routing by {routing_metric}, threshold={threshold})..."
-            )
-        else:
-            print("Generating with profiling (SLM only - no routing)...")
+        print("Generating with profiling (SLM only)...")
 
         # Main generation loop
-        while generated_ids.shape[1] - prompt_len < max_new_tokens:
+        next_logits = slm_logits
+        while len(generated_ids) - prompt_len < max_new_tokens:
             decode_steps += 1
 
-            # Get SLM prediction
-            cache_pos = torch.tensor([offset], device=self.device, dtype=torch.long)
-            slm_outputs = self.slm(
-                input_ids=generated_ids[:, -1:],
-                past_key_values=slm_cache,
-                use_cache=True,
-                cache_position=cache_pos,
-            )
-
-            # Calculate metrics from SLM
-            slm_logits = slm_outputs.logits[:, -1, :]
-            aleatoric_uncertainty, epistemic_uncertainty = compute_logu(slm_logits)
-            entropy = calculate_token_entropy(slm_logits, temperature)
+            # Use logits from previous step to sample next token
+            token_logits = next_logits[-1, :]
+            aleatoric_uncertainty, epistemic_uncertainty = compute_logu(token_logits)
+            entropy = calculate_token_entropy(token_logits, temperature)
             if isinstance(entropy, torch.Tensor):
                 entropy = entropy.item()
 
-            # Decide which model to use
-            if enable_routing:
-                # Use routing strategy
-                if routing_metric == "uncertainty":
-                    use_llm = aleatoric_uncertainty >= threshold
-                else:  # entropy
-                    use_llm = entropy >= threshold
-            else:
-                # No routing - always use SLM
-                use_llm = False
-
-            # Generate token and get probabilities
-            if use_llm:
-                # Use LLM
-                llm_outputs = self.llm(
-                    input_ids=generated_ids[:, -1:],
-                    past_key_values=llm_cache,
-                    use_cache=True,
-                    cache_position=cache_pos,
-                )
-                next_token, probs = sample_token(
-                    llm_outputs.logits[:, -1, :], temperature, top_k, top_p, min_p
-                )
-                model_used = "llm"
-                llm_tokens += 1
-            else:
-                # Use SLM
-                next_token, probs = sample_token(
-                    slm_logits, temperature, top_k, top_p, min_p
-                )
-                # Update LLM cache only if routing is enabled
-                if enable_routing:
-                    _ = self.llm(
-                        input_ids=generated_ids[:, -1:],
-                        past_key_values=llm_cache,
-                        use_cache=True,
-                        cache_position=cache_pos,
-                    )
-                model_used = "slm"
-                slm_tokens += 1
+            next_token, probs = sample_token_optimized(
+                token_logits.unsqueeze(0), temperature, top_k, top_p, min_p
+            )
+            slm_tokens += 1
 
             # Get top-k probabilities for this token
             top_k_probs_tensor, top_k_indices = torch.topk(
@@ -411,22 +323,21 @@ class HybridGenerator:
             ]
 
             # Record token profile
-            token_id = next_token.item()
+            token_id = cast(int, next_token.item())
             token_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
 
             profile.add_token(
                 token_id=token_id,
                 token_text=token_text,
-                position=offset - prompt_len,
+                position=len(generated_ids) - prompt_len,
                 aleatoric_uncertainty=aleatoric_uncertainty,
                 epistemic_uncertainty=epistemic_uncertainty,
                 entropy=entropy,
-                model_used=model_used,
+                model_used="slm",
                 top_k_probs=top_k_probs,
             )
 
-            generated_ids = torch.cat([generated_ids, next_token], dim=-1)
-            offset += 1
+            generated_ids.append(token_id)
 
             # Print token (with indicator for which model was used) if verbose mode is enabled
             if self.verbose:
@@ -436,23 +347,23 @@ class HybridGenerator:
             if token_id in eos_token_ids:
                 break
 
+            # Prepare logits for next step
+            next_logits = self.slm.forward(req_id, [token_id])
+
         if self.enable_stats_sync and self.device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 
         # Finalize profile
         profile.generated_text = self.tokenizer.decode(
-            generated_ids[0], skip_special_tokens=True
+            generated_ids, skip_special_tokens=True
         )
         profile.total_time = end_time - start_time
         profile.stats = {
             "total_tokens": len(profile.tokens),
             "slm_tokens": slm_tokens,
-            "llm_tokens": llm_tokens,
             "decode_steps": decode_steps,
-            "routing_metric": routing_metric,
-            "threshold": threshold,
-            "enable_routing": enable_routing,
+            "enable_routing": False,
         }
 
         print(
@@ -461,6 +372,88 @@ class HybridGenerator:
         print(f"Speed: {len(profile.tokens) / max(profile.total_time, 1e-9):.2f} tok/s")
 
         return profile
+
+    @torch.inference_mode()
+    def simple_generate_with_slm(
+        self,
+        prompt: str,
+        max_new_tokens: int = 2000,
+        temperature: float = 0.6,
+        top_k: int = 20,
+        top_p: float = 0.95,
+        min_p: float = 0.0,
+    ) -> tuple[str, dict]:
+        """
+        Generate text using only the SLM backend with simple sampling.
+
+        This helper avoids any routing logic and always decodes with the SLM.
+        It returns the generated text alongside basic stats including decode speed.
+        """
+        if not getattr(self, "slm", None):
+            raise ValueError("SLM backend is not initialized.")
+
+        # Prepare inputs
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        prompt_ids = inputs["input_ids"][0].tolist()
+        prompt_len = len(prompt_ids)
+        generated_ids = list(prompt_ids)
+
+        eos_token_ids = (
+            [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id else []
+        )
+
+        # Initialize backend session and prefill
+        req_id = random.randint(0, 2**31 - 1)
+        logits = self.slm.forward(req_id, prompt_ids)
+
+        if self.enable_stats_sync and self.device.startswith("cuda"):
+            torch.cuda.synchronize()
+        start_time = time.time()
+
+        slm_tokens = 0
+        decode_steps = 0
+
+        while len(generated_ids) - prompt_len < max_new_tokens:
+            decode_steps += 1
+
+            # Use last logits to sample next token
+            token_logits = logits[-1, :]
+            next_token, _ = sample_token(
+                token_logits.unsqueeze(0), temperature, top_k, top_p, min_p
+            )
+            token_id = cast(int, next_token.item())
+            generated_ids.append(token_id)
+            slm_tokens += 1
+
+            if self.verbose:
+                print(
+                    self.tokenizer.decode([token_id], skip_special_tokens=True),
+                    end="",
+                    flush=True,
+                )
+
+            if token_id in eos_token_ids:
+                break
+
+            # Decode next step with SLM
+            logits = self.slm.forward(req_id, [token_id])
+
+        if self.enable_stats_sync and self.device.startswith("cuda"):
+            torch.cuda.synchronize()
+        end_time = time.time()
+
+        total_new_tokens = len(generated_ids) - prompt_len
+        stats = {
+            "elapsed_time": end_time - start_time,
+            "total_tokens": total_new_tokens,
+            "slm_tokens": slm_tokens,
+            "decode_steps": decode_steps,
+        }
+
+        self._print_stats(stats, strategy="slm_only")
+
+        generated_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return generated_text, stats
 
     def report_backend_stats(self) -> dict:
         """Report statistics from both SLM and LLM backends."""

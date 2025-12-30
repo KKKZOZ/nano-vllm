@@ -260,10 +260,10 @@ class ProfileResult:
 
         # High uncertainty tokens
         print("\n" + "-" * 70)
-        print("Top 10 Most Uncertain Tokens:")
+        print("Top 10 Highest Entropy Tokens:")
         print("-" * 70)
-        high_uncertainty = self.get_high_uncertainty_tokens(10, "uncertainty")
-        for i, token in enumerate(high_uncertainty, 1):
+        high_entropy = self.get_high_uncertainty_tokens(10, "entropy")
+        for i, token in enumerate(high_entropy, 1):
             # Extract float values for printing
             uncertainty = token.aleatoric_uncertainty
             entropy = token.entropy

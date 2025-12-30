@@ -8,8 +8,8 @@ from transformers import AutoTokenizer
 # )
 from hybrid_generator import HybridGenerator
 
-# input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
-input = "write a simple calculator in python"
+input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
+# input = "write a simple calculator in python"
 model = "/root/huggingface/Qwen3-8B"
 draft_model = "/root/huggingface/Qwen3-1.7B"
 
@@ -97,6 +97,7 @@ def run_hybrid_generation(
         device="cuda",
         dtype=torch.float16,
         verbose=verbose,
+        enable_stats_sync=True,
     )
     result, stats = generator.generate(
         prompt=input,
@@ -119,7 +120,7 @@ def run_hybrid_generation(
     # print(result)
 
 
-def profile(prompt, draft_model, model):
+def profile(prompt, draft_model, model, max_new_tokens=10000):
     # Initialize the hybrid generator once
     generator = HybridGenerator(
         slm_model_id=draft_model,
@@ -130,10 +131,7 @@ def profile(prompt, draft_model, model):
 
     profile = generator.generate_with_profile(
         prompt=input,
-        max_new_tokens=20000,
-        threshold=0.1,
-        routing_metric="entropy",
-        enable_routing=False,
+        max_new_tokens=max_new_tokens,
     )
 
     profile.print_summary()
@@ -164,8 +162,24 @@ def profile(prompt, draft_model, model):
     )
 
 
-if __name__ == "__main__":
-    run_hybrid_generation(
-        input, draft_model, model, threshold=0.1, max_new_tokens=2000, verbose=False
+def simple_generate(prompt, draft_model, max_new_tokens=1000):
+    generator = HybridGenerator(
+        slm_model_id=draft_model,
+        llm_model_id=None,
+        device="cuda",
+        dtype=torch.float16,
     )
+    result, stats = generator.simple_generate_with_slm(
+        prompt=input,
+        max_new_tokens=max_new_tokens,
+    )
+    print(f"Statatics: {stats}")
+
+
+if __name__ == "__main__":
+    # run_hybrid_generation(
+    #     input, draft_model, model, threshold=0.5, max_new_tokens=2000, verbose=False
+    # )
+    # profile(input, draft_model, None, 2000)
+    simple_generate(input, draft_model, 2000)
     print("OK")

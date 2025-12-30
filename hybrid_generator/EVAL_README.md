@@ -237,8 +237,7 @@ Key metrics:
 
    profile = generator.generate_with_profile(
        prompt="Your test prompt",
-       max_new_tokens=500,
-       enable_routing=False  # SLM only
+       max_new_tokens=500
    )
 
    profile.print_summary()

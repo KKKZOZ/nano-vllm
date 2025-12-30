@@ -15,7 +15,10 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicCache
 
+from torch.distributions import Categorical
 
+
+@torch.compile()
 def sample_token(
     logits: torch.Tensor,
     temperature: float = 1.0,
@@ -86,6 +89,105 @@ def sample_token(
     return sampled_token, probs
 
 
+@torch.compile(fullgraph=True)
+def sample_token_optimized(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    min_p: float = 0.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Optimized sampling:
+    1. Fuses steps to reduce memory I/O.
+    2. Avoids sorting the full vocabulary if Top-K is active.
+    3. Calculates Softmax as late as possible.
+    """
+    # 1. Apply Temperature
+    if abs(temperature - 1.0) > 1e-6:
+        if temperature == 0.0:
+            # Greedy decoding
+            return logits.argmax(dim=-1, keepdim=True), F.softmax(logits, dim=-1)
+        logits = logits / temperature
+
+    # 2. Pre-calculate Softmax only if needed for Min-P
+    # (Efficiency Trade-off: If min_p > 0, we must calc probabilities early)
+    probs = None
+    if min_p > 0.0:
+        probs = F.softmax(logits, dim=-1)
+        max_probs = probs.max(dim=-1, keepdim=True).values
+        # 直接在 logits 上操作，避免后续重复计算 softmax
+        # 这里的 mask 逻辑可以融合
+        logits = torch.where(
+            probs >= (max_probs * min_p),
+            logits,
+            torch.tensor(float("-inf"), device=logits.device, dtype=logits.dtype),
+        )
+
+    # 3. Efficient Top-K & Top-P
+    # 关键优化：如果同时开启 Top-K 和 Top-P，先做 Top-K，
+    # 然后在缩小的 K 个元素上做 Top-P，而不是对整个 vocab 排序。
+
+    current_logits = logits
+    current_indices = None  # None implies indices are [0, 1, ... V-1]
+
+    if top_k > 0:
+        top_k = min(top_k, logits.size(-1))
+        # 只取 Top-K，后续所有计算只针对这 K 个值
+        current_logits, current_indices = torch.topk(logits, top_k, dim=-1)
+
+    if top_p < 1.0:
+        # 如果前面做了 Top-K，这里的 current_logits 只有 K 个元素，排序非常快
+        # 如果没做 Top-K，这里依然需要全量排序
+        sorted_logits, sorted_indices = torch.sort(
+            current_logits, descending=True, dim=-1
+        )
+
+        # 计算 Top-P 截断
+        sorted_probs = F.softmax(sorted_logits, dim=-1)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+        # 确定保留的掩码
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 0] = False  # 至少保留一个
+
+        # 将不需要的部分设为 -inf
+        sorted_logits = sorted_logits.masked_fill(
+            sorted_indices_to_remove, float("-inf")
+        )
+
+        # 更新 current_logits
+        current_logits = sorted_logits
+
+        # 如果之前有 indices (即经过了 top-k)，需要映射回去
+        if current_indices is not None:
+            # sorted_indices 是相对于 top-k 结果的索引
+            # current_indices 是 top-k 挑选出的原始 vocab 索引
+            current_indices = torch.gather(current_indices, -1, sorted_indices)
+        else:
+            current_indices = sorted_indices
+
+    # 4. Final Sampling
+    # 此时 current_logits 可能只有 K 个元素，或者经过了 Top-P 过滤
+    # 我们只对剩下的有效元素做 Softmax 和 Multinomial
+    safe_probs = F.softmax(current_logits, dim=-1)
+    sampled_index_in_subset = torch.multinomial(safe_probs, num_samples=1)
+
+    # 5. Recover original index
+    if current_indices is not None:
+        sampled_token = torch.gather(current_indices, -1, sampled_index_in_subset)
+    else:
+        sampled_token = sampled_index_in_subset
+
+    # Recover full distribution (only if strictly needed, usually for training/debugging)
+    # Warning: recovering the FULL probability vector is expensive.
+    # In inference, we usually skip this return.
+    # If you MUST return full probs:
+    final_probs = F.softmax(logits, dim=-1)
+
+    return sampled_token, final_probs
+
+
 def compute_logu(
     logits: torch.Tensor, topk: int = 10
 ) -> Tuple[Union[float, torch.Tensor], Union[float, torch.Tensor]]:
@@ -137,6 +239,7 @@ def compute_logu(
         return aleatoric_uncertainty, epistemic_uncertainty
 
 
+@torch.compile()
 def calculate_token_entropy(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:
@@ -157,18 +260,20 @@ def calculate_token_entropy(
         else:
             return torch.zeros(logits.shape[0], device=logits.device)
 
-    # Apply temperature scaling
-    scaled_logits = logits / temperature
+    # # Apply temperature scaling
+    # scaled_logits = logits / temperature
 
-    # Calculate probability distribution (Softmax)
-    probs = F.softmax(scaled_logits, dim=-1)
+    # # Calculate probability distribution (Softmax)
+    # probs = F.softmax(scaled_logits, dim=-1)
 
-    # Calculate entropy H = -sum(p * log(p))
-    # Use log_softmax for numerical stability
-    log_probs = F.log_softmax(scaled_logits, dim=-1)
-    entropy = -torch.sum(probs * log_probs, dim=-1)
+    # # Calculate entropy H = -sum(p * log(p))
+    # # Use log_softmax for numerical stability
+    # log_probs = F.log_softmax(scaled_logits, dim=-1)
+    # entropy = -torch.sum(probs * log_probs, dim=-1)
 
-    return entropy
+    # return entropy
+    dist = Categorical(logits=logits / temperature)
+    return dist.entropy()
 
 
 # @torch.inference_mode()

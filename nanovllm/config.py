@@ -16,7 +16,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     enable_extend_cudagraph: bool = True
-    max_extend_len: int = 100
+    max_extend_len: int = 50
     hf_config: AutoConfig | None = None
     eos: int = -1
     kvcache_block_size: int = 256

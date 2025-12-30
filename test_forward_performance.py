@@ -1,3 +1,4 @@
+import os
 import random
 import time
 
@@ -83,6 +84,9 @@ def test_forward_performance(
     # Clean up
     backend.exit()
 
+    output_dir = "./test_forward_result"
+    os.makedirs(output_dir, exist_ok=True)
+
     # Plot results
     plt.figure(figsize=(10, 6))
     plt.plot(
@@ -110,8 +114,9 @@ def test_forward_performance(
         )
 
     plt.tight_layout()
-    plt.savefig("forward_performance.png", dpi=150, bbox_inches="tight")
-    print("\nPlot saved to: forward_performance.png")
+    output_path = os.path.join(output_dir, "forward_performance.png")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"\nPlot saved to: {output_path}")
 
     # Also create a per-token time plot
     plt.figure(figsize=(10, 6))
@@ -146,8 +151,9 @@ def test_forward_performance(
         )
 
     plt.tight_layout()
-    plt.savefig("forward_performance_per_token.png", dpi=150, bbox_inches="tight")
-    print("Per-token plot saved to: forward_performance_per_token.png")
+    output_path = os.path.join(output_dir, "forward_performance_per_token.png")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"Per-token plot saved to: {output_path}")
 
     # Print summary
     print("\n" + "=" * 60)
@@ -160,7 +166,102 @@ def test_forward_performance(
     print("=" * 60)
 
 
+def test_decode_speed_by_context(
+    model_name,
+    context_lengths: list[int] | None = None,
+    decode_steps: int = 100,
+    enable_extend_cudagraph: bool = True,
+    enable_stats_sync: bool = True,
+):
+    """
+    Test decode speed at different context lengths.
+
+    Steps:
+    1. Initialize Backend
+    2. Prefill to specified context length
+    3. Decode a fixed number of single-token steps
+    4. Plot tokens/sec vs context length
+    """
+    if context_lengths is None:
+        context_lengths = [100, 1000, 10000, 20000]
+
+    print(f"Initializing backend with model: {model_name}")
+    backend = Backend(
+        model_name,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.8,
+        enable_extend_cudagraph=enable_extend_cudagraph,
+        enable_stats_sync=enable_stats_sync,
+    )
+
+    output_dir = "./test_forward_result"
+    os.makedirs(output_dir, exist_ok=True)
+    results = []
+    seq_id = 0
+
+    for context_len in context_lengths:
+        seq_id += 1
+        prefill_tokens = list(range(1, context_len + 1))
+        print(f"\nPrefilling context length: {context_len}")
+        backend.forward(seq_id, prefill_tokens)
+
+        if enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+
+        for i in range(decode_steps):
+            token_id = context_len + 1 + i
+            backend.forward(seq_id, [token_id])
+
+        if enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - start
+
+        speed = decode_steps / max(elapsed, 1e-9)
+        ms_per_token = elapsed / decode_steps * 1000.0
+        results.append((context_len, speed, ms_per_token))
+        print(
+            f"  Decode steps: {decode_steps}, elapsed: {elapsed:.4f}s, "
+            f"speed: {speed:.2f} tok/s, {ms_per_token:.3f} ms/token"
+        )
+
+        backend.free(seq_id)
+
+    backend.exit()
+
+    # Plot tokens/sec vs context length
+    plt.figure(figsize=(10, 6))
+    plt.plot(
+        [r[0] for r in results],
+        [r[1] for r in results],
+        marker="o",
+        linewidth=2,
+        markersize=8,
+    )
+    plt.xlabel("Context Length", fontsize=12)
+    plt.ylabel("Decode Speed (tok/s)", fontsize=12)
+    plt.title("Decode Speed vs Context Length", fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.xscale("log")
+    plt.tight_layout()
+    output_path = os.path.join(output_dir, "decode_speed_by_context.png")
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    print(f"\nPlot saved to: {output_path}")
+
+    # Print summary
+    print("\n" + "=" * 60)
+    print("SUMMARY (CONTEXT LENGTH)")
+    print("=" * 60)
+    print(f"{'Context':<12} {'Speed (tok/s)':<18} {'ms/token':<12}")
+    print("-" * 60)
+    for context_len, speed, ms_per_token in results:
+        print(f"{context_len:<12} {speed:<18.2f} {ms_per_token:<12.3f}")
+    print("=" * 60)
+
+
 def profile_with_pytorch_profiler(model_name: str):
+    output_dir = "./test_forward_result"
+    os.makedirs(output_dir, exist_ok=True)
     backend = Backend(model_name, max_num_seqs=1)
     seq_id = random.randint(0, 1000000)
     prefill_tokens = list(range(1, 257))
@@ -185,8 +286,9 @@ def profile_with_pytorch_profiler(model_name: str):
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
 
     # 导出 Chrome trace（可视化）
-    prof.export_chrome_trace("trace.json")
-    print("Trace saved to trace.json (open in chrome://tracing)")
+    output_path = os.path.join(output_dir, "trace.json")
+    prof.export_chrome_trace(output_path)
+    print(f"Trace saved to {output_path} (open in chrome://tracing)")
 
     # 统计 CPU time
     cpu_time = sum([evt.cpu_time_total for evt in prof.key_averages()])
@@ -199,6 +301,13 @@ def profile_with_pytorch_profiler(model_name: str):
 if __name__ == "__main__":
     model = "/root/huggingface/Qwen3-8B"
     # test_forward_performance(model, False)
-    test_forward_performance(model, True)
+    # test_forward_performance(model, True)
+    test_decode_speed_by_context(
+        model,
+        context_lengths=[100, 1000, 5000, 10000, 20000],
+        decode_steps=100,
+        enable_extend_cudagraph=True,
+        enable_stats_sync=True,
+    )
     # profile_kernel_launch_overhead(model)
     # profile_with_pytorch_profiler(model)

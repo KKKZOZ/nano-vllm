@@ -211,9 +211,7 @@ generator.strategies['custom'] = MyCustomStrategy()
 ```python
 profile = generator.generate_with_profile(
     prompt="Explain quantum computing",
-    max_new_tokens=100,
-    threshold=0.5,
-    routing_metric="uncertainty"  # 或 "entropy"
+    max_new_tokens=100
 )
 
 # 打印详细摘要
