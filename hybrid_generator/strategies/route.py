@@ -9,7 +9,8 @@ from hybrid_generator.strategies.base import GenerationStrategy
 from hybrid_generator.strategies.metrics import LiveMetricsTracker
 from hybrid_generator.strategies.utils import (
     calculate_token_entropy,
-    sample_token,
+    sample_token_flashinfer,
+    calculate_token_entropy_fast,
 )
 
 
@@ -119,8 +120,8 @@ class EntropyStrategy(GenerationStrategy):
                 # === SLM Generation Branch ===
 
                 # 1. Sample
-                next_token_tensor, _ = sample_token(
-                    current_slm_logits.unsqueeze(0), temperature, top_k, top_p, min_p
+                next_token_tensor = sample_token_flashinfer(
+                    current_slm_logits.unsqueeze(0), temperature, top_k, top_p
                 )
                 next_token_id = cast(int, next_token_tensor.item())
                 slm_tokens += 1
@@ -139,7 +140,7 @@ class EntropyStrategy(GenerationStrategy):
             else:
                 # === LLM Generation Branch ===
 
-                # 1. LLM Catch-up (补课)
+                # 1. LLM Catch-up
                 # If SLM generated tokens while LLM was sleeping, feed them now.
                 catchup_tokens = generated_ids[llm_synced_len:]
 
@@ -172,8 +173,8 @@ class EntropyStrategy(GenerationStrategy):
                         llm_synced_len += 1
 
                     # Sample
-                    next_token_tensor, _ = sample_token(
-                        llm_next_logits.unsqueeze(0), temperature, top_k, top_p, min_p
+                    next_token_tensor = sample_token_flashinfer(
+                        llm_next_logits.unsqueeze(0), temperature, top_k, top_p
                     )
                     next_token_id = next_token_tensor.item()
                     llm_tokens += 1

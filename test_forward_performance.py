@@ -44,7 +44,7 @@ def test_forward_performance(
     # Now test decode phase with different numbers of tokens
     # We'll test with: 1, 2, 4, 8, 16, 32, 64, 128, 256 tokens
     # token_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    token_counts = [i for i in range(1, 100)] + [
+    token_counts = [i for i in range(1, 10)] + [
         128,
         256,
         512,
@@ -300,14 +300,16 @@ def profile_with_pytorch_profiler(model_name: str):
 
 if __name__ == "__main__":
     model = "/root/huggingface/Qwen3-8B"
-    # test_forward_performance(model, False)
-    # test_forward_performance(model, True)
-    test_decode_speed_by_context(
-        model,
-        context_lengths=[100, 1000, 5000, 10000, 20000],
-        decode_steps=100,
-        enable_extend_cudagraph=True,
-        enable_stats_sync=True,
-    )
+    print("Disable cudagraph extend")
+    test_forward_performance(model, False, True)
+    print("Enable cudagraph extend")
+    test_forward_performance(model, True, True)
+    # test_decode_speed_by_context(
+    #     model,
+    #     context_lengths=[100, 1000, 5000, 10000, 20000],
+    #     decode_steps=100,
+    #     enable_extend_cudagraph=True,
+    #     enable_stats_sync=True,
+    # )
     # profile_kernel_launch_overhead(model)
     # profile_with_pytorch_profiler(model)

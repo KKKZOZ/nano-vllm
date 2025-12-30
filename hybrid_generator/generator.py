@@ -6,8 +6,6 @@ different strategies that combine a small language model (SLM) with
 a large language model (LLM).
 """
 
-from hybrid_generator.strategies.utils import sample_token_optimized
-
 import random
 import time
 from typing import Literal, cast
@@ -23,6 +21,9 @@ from hybrid_generator.strategies import (
     calculate_token_entropy,
     compute_logu,
     sample_token,
+)
+from hybrid_generator.strategies.utils import (
+    sample_token_flashinfer,
 )
 
 
@@ -308,19 +309,20 @@ class HybridGenerator:
             if isinstance(entropy, torch.Tensor):
                 entropy = entropy.item()
 
-            next_token, probs = sample_token_optimized(
-                token_logits.unsqueeze(0), temperature, top_k, top_p, min_p
+            top_k_probs = None
+            next_token = sample_token_flashinfer(
+                token_logits.unsqueeze(0), temperature, top_k, top_p
             )
             slm_tokens += 1
 
             # Get top-k probabilities for this token
-            top_k_probs_tensor, top_k_indices = torch.topk(
-                probs[0], min(5, probs.shape[-1])
-            )
-            top_k_probs = [
-                (int(top_k_indices[i]), float(top_k_probs_tensor[i]))
-                for i in range(len(top_k_indices))
-            ]
+            # top_k_probs_tensor, top_k_indices = torch.topk(
+            #     probs[0], min(5, probs.shape[-1])
+            # )
+            # top_k_probs = [
+            #     (int(top_k_indices[i]), float(top_k_probs_tensor[i]))
+            #     for i in range(len(top_k_indices))
+            # ]
 
             # Record token profile
             token_id = cast(int, next_token.item())

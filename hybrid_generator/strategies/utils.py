@@ -10,12 +10,12 @@ This module contains helper functions for:
 import time
 from typing import Tuple, Union
 
+import flashinfer
 import torch
 import torch.nn.functional as F
+from torch.distributions import Categorical
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicCache
-
-from torch.distributions import Categorical
 
 
 @torch.compile()
@@ -188,6 +188,66 @@ def sample_token_optimized(
     return sampled_token, final_probs
 
 
+def sample_token_flashinfer(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+) -> torch.Tensor:
+    """
+    使用 FlashInfer 进行高性能采样 (Top-K + Top-P)。
+
+    Args:
+        logits: [Batch, Vocab], 推荐 float16 或 bfloat16
+        temperature: 标量温度
+        top_p: 标量 Top-P
+        top_k: 标量 Top-K
+
+    Returns:
+        sampled_ids: [Batch], 采样得到的 Token ID
+    """
+    if logits.dim() != 2:
+        raise ValueError(
+            f"Expected logits with shape [batch, vocab], got {logits.shape}."
+        )
+    if logits.device.type != "cuda":
+        sampled, _ = sample_token(logits, temperature, top_k, top_p, 0.0)
+        return sampled.squeeze(-1).to(torch.int32)
+    batch_size = logits.shape[0]
+
+    # 1. 预处理 Temperature
+    # FlashInfer 的核心 sampling kernel 通常直接处理 logits，
+    # 建议在传入前应用温度 (Fusion 效果取决于是否使用更高级的 Wrapper，但这样最通用)
+    if abs(temperature - 1.0) > 1e-6:
+        # 注意：如果 temperature == 0，通常由上层逻辑处理为 argmax
+        # 这里为了演示完整性，做一下保护
+        if temperature == 0.0:
+            return torch.argmax(logits, dim=-1).to(torch.int32)
+        logits = logits / temperature
+
+    vocab_size = logits.shape[-1]
+    if top_k <= 0 or top_k > vocab_size:
+        top_k = vocab_size
+    if top_p <= 0.0:
+        return torch.argmax(logits, dim=-1).to(torch.int32)
+    if top_p > 1.0:
+        top_p = 1.0
+
+    # FlashInfer API expects float32 logits and returns int32 samples.
+    logits = logits.float()
+    if not logits.is_contiguous():
+        logits = logits.contiguous()
+
+    sampled_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
+        logits,
+        top_k,
+        top_p,
+        deterministic=True,
+    )
+
+    return sampled_ids
+
+
 def compute_logu(
     logits: torch.Tensor, topk: int = 10
 ) -> Tuple[Union[float, torch.Tensor], Union[float, torch.Tensor]]:
@@ -239,7 +299,7 @@ def compute_logu(
         return aleatoric_uncertainty, epistemic_uncertainty
 
 
-@torch.compile()
+# @torch.compile()
 def calculate_token_entropy(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:
@@ -260,110 +320,46 @@ def calculate_token_entropy(
         else:
             return torch.zeros(logits.shape[0], device=logits.device)
 
-    # # Apply temperature scaling
-    # scaled_logits = logits / temperature
+    # Apply temperature scaling
+    scaled_logits = logits / temperature
 
-    # # Calculate probability distribution (Softmax)
-    # probs = F.softmax(scaled_logits, dim=-1)
+    # Calculate probability distribution (Softmax)
+    probs = F.softmax(scaled_logits, dim=-1)
 
-    # # Calculate entropy H = -sum(p * log(p))
-    # # Use log_softmax for numerical stability
-    # log_probs = F.log_softmax(scaled_logits, dim=-1)
-    # entropy = -torch.sum(probs * log_probs, dim=-1)
+    # Calculate entropy H = -sum(p * log(p))
+    # Use log_softmax for numerical stability
+    log_probs = F.log_softmax(scaled_logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
 
-    # return entropy
-    dist = Categorical(logits=logits / temperature)
-    return dist.entropy()
+    return entropy
+
+    # dist = Categorical(logits=logits / temperature)
+    # return dist.entropy()
 
 
-# @torch.inference_mode()
-# def simple_generate(
-#     model_id: str,
-#     prompt: str,
-#     max_new_tokens: int = 1000,
-#     device: str = "cuda",
-# ):
-#     tokenizer = AutoTokenizer.from_pretrained(model_id)
-#     model = AutoModelForCausalLM.from_pretrained(
-#         model_id,
-#         torch_dtype=torch.float16,
-#         attn_implementation="flash_attention_2",
-#     ).to(device)
+# @torch.compile(mode="reduce-overhead")
+def calculate_token_entropy_fast(
+    logits: torch.Tensor, temperature: float = 1.0
+) -> torch.Tensor:
+    # 1. 处理 Temperature
+    if temperature != 1.0 and temperature > 0:
+        logits = logits / temperature
 
-#     # 1. 预处理输入
-#     inputs = tokenizer(prompt, return_tensors="pt").to(device)
-#     input_ids = inputs["input_ids"]
-#     prompt_len = input_ids.shape[1]
+    # 2. 计算 LogSumExp (LSE) - 这是一个 Reduce 操作
+    # keepdim=True 方便后续广播减法，虽然后面是点乘不需要
+    lse = torch.logsumexp(logits, dim=-1)
 
-#     # 2. 初始化 StaticCache (预分配)
-#     # max_cache_len 必须 >= prompt_len + max_new_tokens
-#     max_cache_len = prompt_len + max_new_tokens
-#     past_key_values = StaticCache(
-#         config=model.config,
-#         max_batch_size=1,
-#         max_cache_len=max_cache_len,
-#         device=device,
-#         dtype=torch.float16,
-#     )
+    # 3. 计算 Softmax (Probs)
+    # 注意：这里我们不需要显式计算 log_probs
+    probs = torch.softmax(logits, dim=-1)
 
-#     # 3. Prefill 阶段 (独立执行)
-#     print("Executing Prefill...")
-#     cache_position = torch.arange(prompt_len, device=device)
-#     out = model(
-#         input_ids=input_ids,
-#         past_key_values=past_key_values,
-#         cache_position=cache_position,
-#         use_cache=True,
-#     )
-#     next_token = out.logits[:, -1:].argmax(dim=-1)
+    # 4. 计算期望 E[z] = sum(p * z)
+    expected_logits = torch.sum(probs * logits, dim=-1)
 
-#     # 4. 编译 Decode Step (可选，但推荐)
-#     # 注意：torch.compile 对动态控制流支持有限，需要把 decode step 封装
-#     def decode_one_step(input_ids, cache_pos):
-#         return (
-#             model(
-#                 input_ids=input_ids,
-#                 past_key_values=past_key_values,
-#                 cache_position=cache_pos,
-#                 use_cache=True,
-#             )
-#             .logits[:, -1:]
-#             .argmax(dim=-1)
-#         )
+    # 5. 应用公式 H = LSE - E[z]
+    entropy = lse - expected_logits
 
-#     # decode_step_compiled = torch.compile(decode_one_step, mode="reduce-overhead")
-#     # 如果不compile，StaticCache 也能带来巨大提升
-#     decode_step = decode_one_step
-
-#     generated_ids = [next_token.item()]
-#     curr_pos = torch.tensor([prompt_len], device=device)  # 追踪当前位置
-
-#     torch.cuda.synchronize()
-#     t0 = time.time()
-
-#     # 5. Decode Loop
-#     for _ in range(max_new_tokens - 1):
-#         # 传入当前 token 和位置
-#         next_token = decode_step(next_token, curr_pos)
-
-#         # 记录结果 (避免 GPU 上 torch.cat)
-#         generated_ids.append(next_token.item())
-
-#         # 更新位置
-#         curr_pos += 1
-
-#         # 简单的 EOS 检查 (放到 CPU 上做虽然慢，但比 GPU sync item 稍微好点，或者攒一批检查)
-#         # 这里为了演示简单，依然使用 item()，但在 StaticCache 加持下 GPU 利用率会高很多
-#         if generated_ids[-1] == tokenizer.eos_token_id:
-#             break
-
-#     torch.cuda.synchronize()
-#     t1 = time.time()
-
-#     speed = len(generated_ids) / (t1 - t0)
-#     print(f"Decode Speed: {speed:.2f} tokens/s")
-
-#     return tokenizer.decode(input_ids[0].tolist() + generated_ids)
+    return entropy
 
 
 @torch.inference_mode()

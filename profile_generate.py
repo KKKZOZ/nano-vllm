@@ -9,7 +9,10 @@ Focus areas:
 """
 
 import torch
-from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+)
 from transformers import AutoTokenizer
 
 from hybrid_generator import HybridGenerator
