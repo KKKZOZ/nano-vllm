@@ -5,6 +5,7 @@ from dataclasses import fields
 import numpy as np
 import torch
 import torch.multiprocessing as mp
+from transformers import AutoTokenizer
 
 from nanovllm.config import Config
 from nanovllm.engine.block_manager import BlockManager
@@ -12,11 +13,11 @@ from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.utils.logger import logger
-from transformers import AutoTokenizer
 
 
 class Backend:
     def __init__(self, model, **kwargs):
+        self.enable_stats_sync = kwargs.pop("enable_stats_sync", False)
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         # logger.info(f"LLMEngine config: {config_kwargs}")
@@ -92,12 +93,16 @@ class Backend:
                 is_extend = True
                 phase = "extend"
 
-        # Record start time
+        # Record start time (synchronize to include GPU work)
+        if self.enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
         start_time = time.perf_counter()
 
         logits = self.model_runner.call("run", [seq], is_prefill, is_extend, False)
 
         # Record end time and statistics
+        if self.enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
         elapsed_time = time.perf_counter() - start_time
         self.stats[phase]["num_tokens"].append(num_tokens)
         self.stats[phase]["times"].append(elapsed_time)
@@ -118,9 +123,12 @@ class Backend:
         Returns a dictionary with statistics for prefill, extend, and decode operations:
         - count: number of calls
         - num_tokens: statistics about number of tokens processed
-        - times: statistics about time spent (in seconds)
+        - times: statistics about time spent (in milliseconds)
         """
         report = {}
+
+        def round4(v):
+            return float(round(v, 4))
 
         for phase in ["prefill", "extend", "decode"]:
             num_tokens_list = self.stats[phase]["num_tokens"]
@@ -136,31 +144,34 @@ class Backend:
 
             num_tokens_array = np.array(num_tokens_list)
             times_array = np.array(times_list)
+            times_array_ms = times_array * 1000.0
 
             report[phase] = {
                 "count": len(num_tokens_list),
                 "num_tokens": {
-                    "mean": float(np.mean(num_tokens_array)),
-                    "median": float(np.median(num_tokens_array)),
-                    "p80": float(np.percentile(num_tokens_array, 80)),
+                    "mean": round4(np.mean(num_tokens_array)),
+                    "median": round4(np.median(num_tokens_array)),
+                    "p80": round4(np.percentile(num_tokens_array, 80)),
                     "min": int(np.min(num_tokens_array)),
                     "max": int(np.max(num_tokens_array)),
                 },
                 "times": {
-                    "mean": float(np.mean(times_array)),
-                    "median": float(np.median(times_array)),
-                    "p80": float(np.percentile(times_array, 80)),
-                    "min": float(np.min(times_array)),
-                    "max": float(np.max(times_array)),
-                    "total": float(np.sum(times_array)),
+                    "mean": round4(np.mean(times_array_ms)),
+                    "median": round4(np.median(times_array_ms)),
+                    "p80": round4(np.percentile(times_array_ms, 80)),
+                    "min": round4(np.min(times_array_ms)),
+                    "max": round4(np.max(times_array_ms)),
+                    "total": round4(np.sum(times_array_ms)),
                 },
             }
 
             # Add throughput for convenience
             if report[phase]["times"]["mean"] > 0:
                 report[phase]["throughput"] = {
-                    "mean_tokens_per_sec": report[phase]["num_tokens"]["mean"]
-                    / report[phase]["times"]["mean"],
+                    "mean_tokens_per_sec": round4(
+                        report[phase]["num_tokens"]["mean"]
+                        / (report[phase]["times"]["mean"] / 1000.0)
+                    ),
                 }
 
         return report
@@ -189,7 +200,7 @@ class Backend:
                     f"    Range: [{phase_stats['num_tokens']['min']}, {phase_stats['num_tokens']['max']}]"
                 )
 
-                print("  Time (seconds):")
+                print("  Time (ms):")
                 print(
                     f"    Mean: {phase_stats['times']['mean']:.4f}, "
                     f"Median: {phase_stats['times']['median']:.4f}, "

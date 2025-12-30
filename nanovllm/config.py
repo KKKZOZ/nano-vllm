@@ -1,8 +1,9 @@
 import os
 from dataclasses import dataclass
 
-from nanovllm.utils.logger import logger
 from transformers import AutoConfig
+
+from nanovllm.utils.logger import logger
 
 
 @dataclass
@@ -15,6 +16,7 @@ class Config:
     tensor_parallel_size: int = 1
     enforce_eager: bool = False
     enable_extend_cudagraph: bool = True
+    max_extend_len: int = 100
     hf_config: AutoConfig | None = None
     eos: int = -1
     kvcache_block_size: int = 256

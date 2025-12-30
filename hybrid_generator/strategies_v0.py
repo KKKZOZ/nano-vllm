@@ -222,8 +222,9 @@ class SpeculativeStrategy(GenerationStrategyV0):
 
         # EOS tokens
         eos_token_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id else []
+        enable_stats_sync = kwargs.get("enable_stats_sync", False)
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         start_time = time.time()
 
@@ -361,7 +362,7 @@ class SpeculativeStrategy(GenerationStrategyV0):
             if any(tok in eos_token_ids for tok in accepted_tokens):
                 break
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 
@@ -442,8 +443,9 @@ class UncertaintyStrategy(GenerationStrategyV0):
         offset = prompt_len
 
         eos_token_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id else []
+        enable_stats_sync = kwargs.get("enable_stats_sync", False)
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         start_time = time.time()
 
@@ -624,7 +626,7 @@ class UncertaintyStrategy(GenerationStrategyV0):
                 if hit_eos:
                     break
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 
@@ -707,8 +709,9 @@ class EntropyStrategy(GenerationStrategyV0):
         llm_cache_pos = prompt_len
 
         eos_token_ids = [tokenizer.eos_token_id] if tokenizer.eos_token_id else []
+        enable_stats_sync = kwargs.get("enable_stats_sync", False)
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         start_time = time.time()
 
@@ -863,7 +866,7 @@ class EntropyStrategy(GenerationStrategyV0):
                 # 理论上不应到达这里，除非 max_new_tokens 限制导致循环提前结束
                 pass
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 

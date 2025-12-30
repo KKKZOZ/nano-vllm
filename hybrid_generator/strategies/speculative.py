@@ -60,6 +60,7 @@ class SpeculativeStrategy(GenerationStrategy):
         print(curr_text, end="", flush=True)
 
         eos_token_id = tokenizer.eos_token_id
+        enable_stats_sync = kwargs.get("enable_stats_sync", False)
         start_time = time.time()
 
         # Statistics
@@ -224,7 +225,7 @@ class SpeculativeStrategy(GenerationStrategy):
         slm.free(req_id)
         llm.free(req_id)
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 

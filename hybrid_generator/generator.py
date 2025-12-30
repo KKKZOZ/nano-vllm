@@ -10,6 +10,7 @@ import time
 from typing import Literal
 
 import torch
+from transformers import AutoTokenizer
 from transformers.cache_utils import DynamicCache
 
 from hybrid_generator.backends import NanovLLMBackend
@@ -21,7 +22,6 @@ from hybrid_generator.strategies import (
     compute_logu,
     sample_token,
 )
-from transformers import AutoTokenizer
 
 
 class HybridGenerator:
@@ -59,6 +59,7 @@ class HybridGenerator:
         dtype=torch.float16,
         verbose: bool = False,
         report_live_metrics: bool = False,
+        enable_stats_sync: bool = False,
     ):
         """
         Initialize the hybrid generator.
@@ -75,6 +76,7 @@ class HybridGenerator:
         self.dtype = dtype
         self.verbose = verbose
         self.report_live_metrics = report_live_metrics
+        self.enable_stats_sync = enable_stats_sync
 
         # Load tokenizer (use LLM's tokenizer)
         print(f"Loading tokenizer from {llm_model_id}")
@@ -91,6 +93,7 @@ class HybridGenerator:
             device=device,
             dtype=dtype,
             gpu_memory_utilization=slm_memory_usage,
+            enable_stats_sync=enable_stats_sync,
         )
 
         print(f"Loading LLM: {llm_model_id}")
@@ -103,6 +106,7 @@ class HybridGenerator:
             device=device,
             dtype=dtype,
             gpu_memory_utilization=llm_memory_usage,
+            enable_stats_sync=enable_stats_sync,
         )
 
         # Initialize strategies
@@ -177,6 +181,7 @@ class HybridGenerator:
             threshold=threshold,
             verbose=self.verbose,
             report_live_metrics=self.report_live_metrics,
+            enable_stats_sync=self.enable_stats_sync,
         )
 
         # Print statistics
@@ -319,7 +324,7 @@ class HybridGenerator:
             [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id else []
         )
 
-        if self.device.startswith("cuda"):
+        if self.enable_stats_sync and self.device.startswith("cuda"):
             torch.cuda.synchronize()
         start_time = time.time()
 
@@ -431,7 +436,7 @@ class HybridGenerator:
             if token_id in eos_token_ids:
                 break
 
-        if self.device.startswith("cuda"):
+        if self.enable_stats_sync and self.device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 

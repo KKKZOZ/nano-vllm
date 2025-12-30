@@ -12,9 +12,8 @@ from typing import Tuple, Union
 
 import torch
 import torch.nn.functional as F
-from transformers.cache_utils import DynamicCache
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.cache_utils import DynamicCache
 
 
 def sample_token(
@@ -269,6 +268,7 @@ def simple_generate(
     max_new_tokens: int = 2000,
     device: str = "cuda",
     dtype=torch.float16,
+    enable_stats_sync: bool = False,
 ):
     print(f"Using model: {model_id}")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -297,7 +297,7 @@ def simple_generate(
         eos_token_ids.extend(tokenizer.additional_special_tokens_ids)
     # print(f"Using eos_token_ids: {eos_token_ids}")
 
-    if device.startswith("cuda"):
+    if enable_stats_sync and device.startswith("cuda"):
         torch.cuda.synchronize()
     t0 = time.time()
 
@@ -326,7 +326,7 @@ def simple_generate(
         # cache_position 每轮 +1
         cache_position = cache_position[-1:] + 1
 
-    if device.startswith("cuda"):
+    if enable_stats_sync and device.startswith("cuda"):
         torch.cuda.synchronize()
     t1 = time.time()
 

@@ -74,7 +74,8 @@ class EntropyStrategy(GenerationStrategy):
 
         eos_token_id = tokenizer.eos_token_id
 
-        if device.startswith("cuda"):
+        enable_stats_sync = kwargs.get("enable_stats_sync", False)
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         start_time = time.time()
 
@@ -208,7 +209,7 @@ class EntropyStrategy(GenerationStrategy):
         slm.free(req_id)
         llm.free(req_id)
 
-        if device.startswith("cuda"):
+        if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()
         end_time = time.time()
 

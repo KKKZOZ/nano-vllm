@@ -3,13 +3,14 @@ import time
 
 import matplotlib.pyplot as plt
 import torch
+from torch.profiler import ProfilerActivity, profile, record_function
 
 from nanovllm.backend import Backend
 
-from torch.profiler import profile, ProfilerActivity, record_function
 
-
-def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
+def test_forward_performance(
+    model_name, enable_extend_cudagraph: bool = True, enable_stats_sync: bool = False
+):
     """
     Test the forward interface performance with different numbers of tokens.
 
@@ -20,10 +21,15 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
     4. Plot the results
     """
     print(f"Initializing backend with model: {model_name}")
-    backend = Backend(model_name, max_num_seqs=1)
+    backend = Backend(
+        model_name,
+        max_num_seqs=1,
+        enable_extend_cudagraph=enable_extend_cudagraph,
+        enable_stats_sync=enable_stats_sync,
+    )
 
     # Prepare initial tokens for prefill (256 tokens)
-    seq_id = random.randint(0, 1000000)
+    seq_id = 0
     prefill_tokens = list(range(1, 257))  # Use token IDs 1-256 for prefill
 
     print(f"Prefilling with {len(prefill_tokens)} tokens...")
@@ -32,14 +38,12 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
     prefill_time = time.perf_counter() - start
     print(f"Prefill time: {prefill_time:.4f}s")
     print(f"Logits shape: {logits.shape}")
+    backend.free(seq_id)
 
     # Now test decode phase with different numbers of tokens
     # We'll test with: 1, 2, 4, 8, 16, 32, 64, 128, 256 tokens
     # token_counts = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
-    token_counts = [i for i in range(1, 10)] + [
-        16,
-        32,
-        64,
+    token_counts = [i for i in range(1, 100)] + [
         128,
         256,
         512,
@@ -53,36 +57,30 @@ def test_forward_performance(model_name: str = "/root/huggingface/Qwen3-8B"):
     print("\nTesting decode phase with different token counts...")
     for num_tokens in token_counts:
         # Free the current sequence and start fresh
-        # TODO: Figure out why this line causes issues
-        # backend.free(seq_id)
+        seq_id += 1
 
         # # Re-prefill to get back to 256 tokens
-        # backend.forward(seq_id, prefill_tokens)
+        backend.forward(seq_id, prefill_tokens)
 
         # # Now test decode with num_tokens
         decode_tokens = list(range(257, 257 + num_tokens))
 
-        # # Warm up
-        # backend.forward(seq_id, decode_tokens)
-
-        # # Re-do the test for timing
-        # backend.free(seq_id)
-        backend.forward(seq_id, prefill_tokens)
-
         # Measure time
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        if enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
         start = time.perf_counter()
         logits = backend.forward(seq_id, decode_tokens)
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
+        if enable_stats_sync and torch.cuda.is_available():
+            torch.cuda.synchronize()
         elapsed = time.perf_counter() - start
 
         times.append(elapsed)
         print(
             f"  {num_tokens:3d} tokens: {elapsed * 1000:.2f}ms ({elapsed / num_tokens * 1000:.3f}ms per token)"
         )
+        backend.free(seq_id)
 
     # Clean up
-    backend.free(seq_id)
     backend.exit()
 
     # Plot results
@@ -200,6 +198,7 @@ def profile_with_pytorch_profiler(model_name: str):
 
 if __name__ == "__main__":
     model = "/root/huggingface/Qwen3-8B"
-    test_forward_performance(model)
+    # test_forward_performance(model, False)
+    test_forward_performance(model, True)
     # profile_kernel_launch_overhead(model)
     # profile_with_pytorch_profiler(model)

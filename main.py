@@ -1,15 +1,15 @@
 import json
 
 import torch
+from transformers import AutoTokenizer
 
 # from generate import (
 #     simple_generate,
 # )
 from hybrid_generator import HybridGenerator
-from transformers import AutoTokenizer
 
-input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
-# input = "write a simple calculator in python"
+# input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
+input = "write a simple calculator in python"
 model = "/root/huggingface/Qwen3-8B"
 draft_model = "/root/huggingface/Qwen3-1.7B"
 
@@ -113,10 +113,10 @@ def run_hybrid_generation(
     engine_stats = generator.report_backend_stats()
     # print(f"Engine Backend Statistics: {engine_stats}")
     print(
-        f"Engine Backend Statistics:\n{json.dumps(engine_stats['llm_stats'], indent=2, ensure_ascii=False)}"
+        f"Engine Backend Statistics:\n{json.dumps(engine_stats, indent=2, ensure_ascii=False)}"
     )
 
-    print(result)
+    # print(result)
 
 
 def profile(prompt, draft_model, model):
@@ -166,6 +166,6 @@ def profile(prompt, draft_model, model):
 
 if __name__ == "__main__":
     run_hybrid_generation(
-        input, draft_model, model, threshold=0.1, max_new_tokens=1000, verbose=False
+        input, draft_model, model, threshold=0.1, max_new_tokens=2000, verbose=False
     )
     print("OK")

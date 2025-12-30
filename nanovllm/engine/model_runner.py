@@ -22,6 +22,7 @@ class ModelRunner:
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
+        self.max_extend_len = config.max_extend_len
         self.rank = rank
         self.event = event
 
@@ -386,7 +387,13 @@ class ModelRunner:
     def run(
         self, seqs: list[Sequence], is_prefill: bool, is_extend=False, do_sample=True
     ) -> list[int] | torch.Tensor:
-        if is_extend:
+        cache_hit = is_prefill and all(
+            seq.num_cached_tokens == len(seq) for seq in seqs
+        )
+        if cache_hit:
+            # Full prefix cache hit: return logits for the last token via decode path.
+            input_ids, positions = self.prepare_decode(seqs)
+        elif is_extend:
             input_ids, positions = self.prepare_extend(seqs)
         elif is_prefill:
             input_ids, positions = self.prepare_prefill(seqs)
@@ -394,7 +401,9 @@ class ModelRunner:
             input_ids, positions = self.prepare_decode(seqs)
 
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill, is_extend)
+        logits = self.run_model(
+            input_ids, positions, is_prefill and not cache_hit, is_extend
+        )
         reset_context()
 
         if do_sample:
@@ -454,7 +463,7 @@ class ModelRunner:
 
         # CUDA graph capture for extend (using flash_attn_with_kvcache)
         if config.enable_extend_cudagraph:
-            self.extend_graph_len = [i for i in range(1, 10)]
+            self.extend_graph_len = [i for i in range(1, self.max_extend_len + 1)]
             self.extend_graphs = {}
             max_extend_len = max(self.extend_graph_len)
 
