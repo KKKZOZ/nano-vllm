@@ -8,7 +8,7 @@ from transformers import AutoTokenizer
 # )
 from hybrid_generator import HybridGenerator
 
-input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
+input = "Let $O(0,0), A(\\tfrac{1}{2}, 0),$ and $B(0, \\tfrac{\\sqrt{3}}{2})$ be points in the coordinate plane. Let $\\mathcal{F}$ be the family of segments $\\overline{PQ}$ of unit length lying in the first quadrant with $P$ on the $x$-axis and $Q$ on the $y$-axis. There is a unique point $C$ on $\\overline{AB}$, distinct from $A$ and $B$, that does not belong to any segment from $\\mathcal{F}$ other than $\\overline{AB}$. Then $OC^2 = \\tfrac{p}{q}$, where $p$ and $q$ are relatively prime positive integers. Find $p + q$."
 # input = "write a simple calculator in python"
 llm = "/root/huggingface/Qwen3-8B"
 slm = "/root/huggingface/Qwen3-1.7B"
@@ -110,7 +110,7 @@ def run_hybrid_generation(
         min_p=0.0,
         threshold=threshold,
     )
-    print(f"Statatics: {stats}")
+    # print(f"Statatics: {stats}")
 
     engine_stats = generator.report_backend_stats()
     # print(f"Engine Backend Statistics: {engine_stats}")
@@ -183,10 +183,10 @@ if __name__ == "__main__":
         input,
         slm,
         llm,
-        # "entropy",
-        "semantic_enhanced_route",
-        threshold=0.2,
-        max_new_tokens=30000,
+        "entropy",
+        # "semantic_enhanced_route",
+        threshold=0.01,
+        max_new_tokens=10000,
         verbose=False,
     )
     # profile(input, draft_model, None, 2000)

@@ -10,15 +10,14 @@ This module contains helper functions for:
 import time
 from typing import Tuple, Union
 
-import triton
-import triton.language as tl
-
 import flashinfer
 import torch
 import torch.nn.functional as F
-from torch.distributions import Categorical
+import triton
+import triton.language as tl
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicCache
+
 from nanovllm.utils.logger import logger
 
 
@@ -506,6 +505,7 @@ def _token_entropy_kernel(
 def calculate_token_entropy_triton(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:
+    # logger.info(f"Calculating token entropy with Triton, logits shape: {logits.shape}")
     squeeze_output = False
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)

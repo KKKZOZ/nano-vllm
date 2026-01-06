@@ -8,11 +8,8 @@ from hybrid_generator.backends import BackendId, HybridBackend
 from hybrid_generator.strategies.base import GenerationStrategy
 from hybrid_generator.strategies.metrics import LiveMetricsTracker
 from hybrid_generator.strategies.utils import (
-    calculate_token_entropy,
-    sample_token,
-    sample_token_flashinfer,
-    calculate_token_entropy_fast,
     calculate_token_entropy_triton,
+    sample_token_flashinfer,
 )
 
 
@@ -114,7 +111,7 @@ class EntropyStrategy(GenerationStrategy):
 
             # --- Decision Phase ---
             # Calculate entropy on current SLM logits
-            entropy = calculate_token_entropy(current_slm_logits, temperature)
+            entropy = calculate_token_entropy_triton(current_slm_logits, temperature)
             # aleatoric_uncertainty, _ = compute_logu(current_slm_logits)
 
             use_llm = entropy >= threshold

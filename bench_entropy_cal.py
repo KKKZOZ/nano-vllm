@@ -4,7 +4,16 @@ import triton
 import triton.language as tl
 
 
-# === PyTorch 基准实现 ===
+# === PyTorch 实现 ===
+def _entropy_impl(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """Core entropy calculation logic."""
+    scaled_logits = logits / temperature
+    probs = F.softmax(scaled_logits, dim=-1)
+    log_probs = F.log_softmax(scaled_logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
+
+
 def calculate_token_entropy_torch(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:
@@ -13,7 +22,15 @@ def calculate_token_entropy_torch(
             return torch.tensor(0.0, device=logits.device)
         else:
             return torch.zeros(logits.shape[0], device=logits.device)
+    return _entropy_impl(logits, temperature)
 
+
+# === torch.compile 版本 ===
+# Default compile
+@torch.compile
+def _entropy_impl_compile_default(
+    logits: torch.Tensor, temperature: float
+) -> torch.Tensor:
     scaled_logits = logits / temperature
     probs = F.softmax(scaled_logits, dim=-1)
     log_probs = F.log_softmax(scaled_logits, dim=-1)
@@ -21,9 +38,53 @@ def calculate_token_entropy_torch(
     return entropy
 
 
-# === V1: 原始 Triton 实现 ===
+# reduce-overhead mode - optimizes for reduced Python overhead
+@torch.compile(mode="reduce-overhead")
+def _entropy_impl_compile_reduce_overhead(
+    logits: torch.Tensor, temperature: float
+) -> torch.Tensor:
+    scaled_logits = logits / temperature
+    probs = F.softmax(scaled_logits, dim=-1)
+    log_probs = F.log_softmax(scaled_logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
+
+
+# max-autotune mode - maximum autotuning for best performance
+@torch.compile(mode="max-autotune")
+def _entropy_impl_compile_max_autotune(
+    logits: torch.Tensor, temperature: float
+) -> torch.Tensor:
+    scaled_logits = logits / temperature
+    probs = F.softmax(scaled_logits, dim=-1)
+    log_probs = F.log_softmax(scaled_logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
+
+
+# fullgraph=True - ensures no graph breaks
+@torch.compile(fullgraph=True)
+def _entropy_impl_compile_fullgraph(
+    logits: torch.Tensor, temperature: float
+) -> torch.Tensor:
+    scaled_logits = logits / temperature
+    probs = F.softmax(scaled_logits, dim=-1)
+    log_probs = F.log_softmax(scaled_logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
+    return entropy
+
+
+COMPILED_IMPLS = {
+    "compile_default": _entropy_impl_compile_default,
+    "compile_reduce_overhead": _entropy_impl_compile_reduce_overhead,
+    "compile_max_autotune": _entropy_impl_compile_max_autotune,
+    "compile_fullgraph": _entropy_impl_compile_fullgraph,
+}
+
+
+# === Triton 实现 ===
 @triton.jit
-def _token_entropy_kernel_v1(
+def _token_entropy_kernel(
     logits_ptr,
     entropy_ptr,
     vocab_size,
@@ -33,6 +94,7 @@ def _token_entropy_kernel_v1(
     row_idx = tl.program_id(0)
     row_start = logits_ptr + row_idx * vocab_size
 
+    # Pass 1: Find max
     max_val = float("-inf")
     for block_start in range(0, vocab_size, BLOCK_SIZE):
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -41,6 +103,7 @@ def _token_entropy_kernel_v1(
         scaled = logits / temperature
         max_val = tl.maximum(max_val, tl.max(scaled, axis=0))
 
+    # Pass 2: Compute sum(exp)
     sum_exp = 0.0
     for block_start in range(0, vocab_size, BLOCK_SIZE):
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
@@ -51,21 +114,24 @@ def _token_entropy_kernel_v1(
 
     log_sum_exp = tl.log(sum_exp)
 
+    # Pass 3: Compute entropy
     entropy = 0.0
     for block_start in range(0, vocab_size, BLOCK_SIZE):
         offsets = block_start + tl.arange(0, BLOCK_SIZE)
         mask = offsets < vocab_size
         logits = tl.load(row_start + offsets, mask=mask, other=float("-inf"))
         scaled = logits / temperature
+
         shifted = scaled - max_val
         p = tl.exp(shifted) / sum_exp
         log_p = shifted - log_sum_exp
+
         entropy += tl.sum(tl.where(mask, -p * log_p, 0.0), axis=0)
 
     tl.store(entropy_ptr + row_idx, entropy)
 
 
-def calculate_token_entropy_triton_v1(
+def calculate_token_entropy_triton(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:
     squeeze_output = False
@@ -84,7 +150,7 @@ def calculate_token_entropy_triton_v1(
 
     BLOCK_SIZE = triton.next_power_of_2(min(vocab_size, 4096))
 
-    _token_entropy_kernel_v1[(batch_size,)](
+    _token_entropy_kernel[(batch_size,)](
         logits,
         entropy,
         vocab_size,
@@ -95,256 +161,115 @@ def calculate_token_entropy_triton_v1(
     return entropy.squeeze(0) if squeeze_output else entropy
 
 
-# === V2: 减少 Python 开销 ===
-@triton.jit
-def _token_entropy_kernel_v2(
-    logits_ptr,
-    entropy_ptr,
-    vocab_size,
-    inv_temp,
-    BLOCK_SIZE: tl.constexpr,
-):
-    row_idx = tl.program_id(0)
-    row_start = logits_ptr + row_idx * vocab_size
-
-    max_val = float("-inf")
-    for off in range(0, vocab_size, BLOCK_SIZE):
-        offs = off + tl.arange(0, BLOCK_SIZE)
-        mask = offs < vocab_size
-        x = tl.load(row_start + offs, mask=mask, other=float("-inf"))
-        x = x * inv_temp
-        max_val = tl.maximum(max_val, tl.max(x, axis=0))
-
-    sum_exp = 0.0
-    for off in range(0, vocab_size, BLOCK_SIZE):
-        offs = off + tl.arange(0, BLOCK_SIZE)
-        mask = offs < vocab_size
-        x = tl.load(row_start + offs, mask=mask, other=float("-inf"))
-        x = x * inv_temp - max_val
-        sum_exp += tl.sum(tl.where(mask, tl.exp(x), 0.0), axis=0)
-
-    log_sum_exp = tl.log(sum_exp)
-
-    entropy = 0.0
-    for off in range(0, vocab_size, BLOCK_SIZE):
-        offs = off + tl.arange(0, BLOCK_SIZE)
-        mask = offs < vocab_size
-        x = tl.load(row_start + offs, mask=mask, other=float("-inf"))
-        x = x * inv_temp - max_val
-        p = tl.exp(x) / sum_exp
-        log_p = x - log_sum_exp
-        entropy += tl.sum(tl.where(mask, -p * log_p, 0.0), axis=0)
-
-    tl.store(entropy_ptr + row_idx, entropy)
-
-
-def calculate_token_entropy_triton_v2(
-    logits: torch.Tensor, temperature: float = 1.0
-) -> torch.Tensor:
-    orig_dim = logits.dim()
-    if orig_dim == 1:
-        logits = logits.unsqueeze(0)
-
-    batch_size, vocab_size = logits.shape
-    entropy = torch.empty(batch_size, device=logits.device, dtype=logits.dtype)
-
-    _token_entropy_kernel_v2[(batch_size,)](
-        logits,
-        entropy,
-        vocab_size,
-        1.0 / temperature,
-        BLOCK_SIZE=4096,
-    )
-
-    return entropy[0] if orig_dim == 1 else entropy
-
-
-# === V3: CUDA Graph 版本 ===
-class TokenEntropyGraphed:
-    def __init__(
-        self, batch_size: int, vocab_size: int, temperature: float, device="cuda"
-    ):
-        self.batch_size = batch_size
-        self.vocab_size = vocab_size
-        self.inv_temp = 1.0 / temperature
-
-        self.logits_buffer = torch.empty(
-            batch_size, vocab_size, device=device, dtype=torch.float32
-        )
-        self.entropy_buffer = torch.empty(
-            batch_size, device=device, dtype=torch.float32
-        )
-
-        # Warmup
-        for _ in range(3):
-            _token_entropy_kernel_v2[(batch_size,)](
-                self.logits_buffer,
-                self.entropy_buffer,
-                vocab_size,
-                self.inv_temp,
-                BLOCK_SIZE=4096,
-            )
-        torch.cuda.synchronize()
-
-        # Capture
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph):
-            _token_entropy_kernel_v2[(batch_size,)](
-                self.logits_buffer,
-                self.entropy_buffer,
-                vocab_size,
-                self.inv_temp,
-                BLOCK_SIZE=4096,
-            )
-
-    def __call__(self, logits: torch.Tensor) -> torch.Tensor:
-        self.logits_buffer.copy_(logits)
-        self.graph.replay()
-        return self.entropy_buffer
-
-
 # === Benchmark ===
 def benchmark():
-    print("=" * 70)
-    print("Token Entropy Benchmark (Qwen3 focused)")
-    print("=" * 70)
+    print("=" * 90)
+    print(
+        "Token Entropy Benchmark: PyTorch vs torch.compile vs Triton (Qwen3 vocab_size=151936)"
+    )
+    print("=" * 90)
 
-    # Qwen3 实际配置
-    QWEN3_VOCAB_SIZE = 151936
+    vocab_size = 151936  # Qwen3 vocab
+    batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128]
+    temperature = 0.7
+    num_runs = 5
 
-    configs = [
-        # (batch_size, vocab_size, description)
-        (1, QWEN3_VOCAB_SIZE, "Qwen3 single"),
-        (4, QWEN3_VOCAB_SIZE, "Qwen3 batch=4"),
-        (8, QWEN3_VOCAB_SIZE, "Qwen3 batch=8"),
-        (16, QWEN3_VOCAB_SIZE, "Qwen3 batch=16"),
-        (32, QWEN3_VOCAB_SIZE, "Qwen3 batch=32"),
+    # All implementations to benchmark
+    impl_names = [
+        "torch",
+        "compile_default",
+        "compile_reduce_overhead",
+        "compile_max_autotune",
+        "compile_fullgraph",
+        "triton",
     ]
 
-    temperature = 0.7
-    warmup = 100
-    rep = 500
+    results = []
 
-    for batch_size, vocab_size, desc in configs:
+    # Global warmup - trigger compilation for all torch.compile variants
+    print("\nWarming up and compiling...")
+    for bs in [1, 32, 128]:
+        warmup_logits = torch.randn(bs, vocab_size, device="cuda", dtype=torch.float32)
+        for _ in range(10):
+            _ = calculate_token_entropy_torch(warmup_logits, temperature)
+            _ = calculate_token_entropy_triton(warmup_logits, temperature)
+            for impl_fn in COMPILED_IMPLS.values():
+                _ = impl_fn(warmup_logits, temperature)
+        torch.cuda.synchronize()
+    print("Warmup done.\n")
+
+    for batch_size in batch_sizes:
         logits = torch.randn(batch_size, vocab_size, device="cuda", dtype=torch.float32)
 
-        entropy_graphed = TokenEntropyGraphed(batch_size, vocab_size, temperature)
+        row = {"batch_size": batch_size}
 
-        # Warmup
-        for _ in range(10):
-            _ = calculate_token_entropy_torch(logits, temperature)
-            _ = calculate_token_entropy_triton_v1(logits, temperature)
-            _ = calculate_token_entropy_triton_v2(logits, temperature)
-            _ = entropy_graphed(logits)
-        torch.cuda.synchronize()
+        # Benchmark each implementation
+        for impl_name in impl_names:
+            if impl_name == "torch":
+                fn = lambda: calculate_token_entropy_torch(logits, temperature)
+            elif impl_name == "triton":
+                fn = lambda: calculate_token_entropy_triton(logits, temperature)
+            else:
+                impl_fn = COMPILED_IMPLS[impl_name]
+                fn = lambda impl_fn=impl_fn: impl_fn(logits, temperature)
 
-        # Correctness
-        out_torch = calculate_token_entropy_torch(logits, temperature)
-        out_v1 = calculate_token_entropy_triton_v1(logits, temperature)
-        out_v2 = calculate_token_entropy_triton_v2(logits, temperature)
-        out_graph = entropy_graphed(logits)
+            times = []
+            for _ in range(num_runs):
+                ms = triton.testing.do_bench(fn, warmup=100, rep=500)
+                times.append(ms)
+            row[impl_name] = sum(times) / num_runs
 
-        diff_v1 = (out_torch - out_v1).abs().max().item()
-        diff_v2 = (out_torch - out_v2).abs().max().item()
-        diff_graph = (out_torch - out_graph).abs().max().item()
+        results.append(row)
 
-        # Benchmark
-        ms_torch = triton.testing.do_bench(
-            lambda: calculate_token_entropy_torch(logits, temperature),
-            warmup=warmup,
-            rep=rep,
-        )
-        ms_v1 = triton.testing.do_bench(
-            lambda: calculate_token_entropy_triton_v1(logits, temperature),
-            warmup=warmup,
-            rep=rep,
-        )
-        ms_v2 = triton.testing.do_bench(
-            lambda: calculate_token_entropy_triton_v2(logits, temperature),
-            warmup=warmup,
-            rep=rep,
-        )
-        ms_graph = triton.testing.do_bench(
-            lambda: entropy_graphed(logits),
-            warmup=warmup,
-            rep=rep,
-        )
+    # Display name mapping
+    display_names = {
+        "torch": "torch",
+        "compile_default": "compile",
+        "compile_reduce_overhead": "reduce-oh",
+        "compile_max_autotune": "max-auto",
+        "compile_fullgraph": "fullgraph",
+        "triton": "triton",
+    }
 
-        print(f"\n{desc}: ({batch_size}, {vocab_size})")
-        print(f"  {'Method':<15} {'Time (ms)':<12} {'vs PyTorch':<12} {'Max Diff':<12}")
-        print(f"  {'-' * 51}")
-        print(f"  {'PyTorch':<15} {ms_torch:<12.4f} {'1.00x':<12} {'-':<12}")
-        print(
-            f"  {'Triton V1':<15} {ms_v1:<12.4f} {ms_torch / ms_v1:<12.2f}x {diff_v1:<12.2e}"
-        )
-        print(
-            f"  {'Triton V2':<15} {ms_v2:<12.4f} {ms_torch / ms_v2:<12.2f}x {diff_v2:<12.2e}"
-        )
-        print(
-            f"  {'CUDA Graph':<15} {ms_graph:<12.4f} {ms_torch / ms_graph:<12.2f}x {diff_graph:<12.2e}"
-        )
+    # Print table
+    col_width = 10
+    header = f"{'Batch':>6}"
+    for name in impl_names:
+        header += f" | {display_names[name]:>{col_width}}"
 
-    # 额外测试：模拟推理场景下的连续调用
-    print("\n" + "=" * 70)
-    print("Latency Test: 1000 consecutive calls (batch=1, simulating inference)")
-    print("=" * 70)
+    print("Latency (ms):")
+    print("-" * len(header))
+    print(header)
+    print("-" * len(header))
 
-    batch_size, vocab_size = 1, QWEN3_VOCAB_SIZE
-    logits = torch.randn(batch_size, vocab_size, device="cuda", dtype=torch.float32)
-    entropy_graphed = TokenEntropyGraphed(batch_size, vocab_size, temperature)
+    for r in results:
+        line = f"{r['batch_size']:>6}"
+        for name in impl_names:
+            line += f" | {r[name]:>{col_width}.4f}"
+        print(line)
+    print("-" * len(header))
 
-    import time
+    # Print speedup table (relative to torch)
+    print("\n" + "=" * 90)
+    print("Speedup vs PyTorch (higher is better)")
+    print("=" * 90)
 
-    n_calls = 1000
+    header = f"{'Batch':>6}"
+    for name in impl_names[1:]:  # Skip torch itself
+        header += f" | {display_names[name]:>{col_width}}"
 
-    # PyTorch
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(n_calls):
-        _ = calculate_token_entropy_torch(logits, temperature)
-    torch.cuda.synchronize()
-    pytorch_total = (time.perf_counter() - t0) * 1000
+    print("-" * len(header))
+    print(header)
+    print("-" * len(header))
 
-    # V1
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(n_calls):
-        _ = calculate_token_entropy_triton_v1(logits, temperature)
-    torch.cuda.synchronize()
-    v1_total = (time.perf_counter() - t0) * 1000
-
-    # V2
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(n_calls):
-        _ = calculate_token_entropy_triton_v2(logits, temperature)
-    torch.cuda.synchronize()
-    v2_total = (time.perf_counter() - t0) * 1000
-
-    # CUDA Graph
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(n_calls):
-        _ = entropy_graphed(logits)
-    torch.cuda.synchronize()
-    graph_total = (time.perf_counter() - t0) * 1000
-
-    print(
-        f"\n  {'Method':<15} {'Total (ms)':<15} {'Per call (us)':<15} {'vs PyTorch':<12}"
-    )
-    print(f"  {'-' * 57}")
-    print(
-        f"  {'PyTorch':<15} {pytorch_total:<15.2f} {pytorch_total / n_calls * 1000:<15.2f} {'1.00x':<12}"
-    )
-    print(
-        f"  {'Triton V1':<15} {v1_total:<15.2f} {v1_total / n_calls * 1000:<15.2f} {pytorch_total / v1_total:<12.2f}x"
-    )
-    print(
-        f"  {'Triton V2':<15} {v2_total:<15.2f} {v2_total / n_calls * 1000:<15.2f} {pytorch_total / v2_total:<12.2f}x"
-    )
-    print(
-        f"  {'CUDA Graph':<15} {graph_total:<15.2f} {graph_total / n_calls * 1000:<15.2f} {pytorch_total / graph_total:<12.2f}x"
-    )
+    for r in results:
+        line = f"{r['batch_size']:>6}"
+        torch_time = r["torch"]
+        for name in impl_names[1:]:
+            speedup = torch_time / r[name]
+            line += f" | {speedup:>{col_width - 1}.2f}x"
+        print(line)
+    print("-" * len(header))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,8 @@ from typing import Literal, cast
 import torch
 from transformers import AutoTokenizer
 
-from hybrid_generator.backends import HybridBackend as HGHybridBackend, NanovLLMBackend
+from hybrid_generator.backends import HybridBackend as HGHybridBackend
+from hybrid_generator.backends import NanovLLMBackend
 from hybrid_generator.profiling import ProfileResult
 from hybrid_generator.strategies import (
     EntropyStrategy,
@@ -22,9 +23,6 @@ from hybrid_generator.strategies import (
     calculate_token_entropy,
     compute_logu,
     sample_token,
-)
-from hybrid_generator.strategies.utils import (
-    sample_token_flashinfer,
 )
 
 
