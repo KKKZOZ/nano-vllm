@@ -8,17 +8,17 @@ from transformers import AutoTokenizer
 # )
 from hybrid_generator import HybridGenerator
 
-# input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
-input = "write a simple calculator in python"
-model = "/root/huggingface/Qwen3-8B"
-draft_model = "/root/huggingface/Qwen3-1.7B"
+input = "Let $p$ be the least prime number for which there exists a positive integer $n$ such that $n^{4}+1$ is divisible by $p^{2}$. Find the least positive integer $m$ such that $m^{4}+1$ is divisible by $p^{2}$."
+# input = "write a simple calculator in python"
+llm = "/root/huggingface/Qwen3-8B"
+slm = "/root/huggingface/Qwen3-1.7B"
 
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": input},
 ]
 
-tokenizer = AutoTokenizer.from_pretrained(model)
+tokenizer = AutoTokenizer.from_pretrained(llm)
 input = tokenizer.apply_chat_template(
     messages,
     tokenize=False,
@@ -83,6 +83,7 @@ def run_hybrid_generation(
     prompt,
     draft_model,
     model,
+    strategy="entropy",
     slm_memory_usage=0.05,
     llm_memory_usage=0.9,
     threshold=0.1,
@@ -101,7 +102,7 @@ def run_hybrid_generation(
     )
     result, stats = generator.generate(
         prompt=input,
-        strategy="entropy",
+        strategy=strategy,
         max_new_tokens=max_new_tokens,
         temperature=0.6,
         top_k=20,
@@ -117,7 +118,8 @@ def run_hybrid_generation(
         f"Engine Backend Statistics:\n{json.dumps(engine_stats, indent=2, ensure_ascii=False)}"
     )
 
-    # print(result)
+    with open("main-result.txt", "w", encoding="utf-8") as f:
+        f.write(result)
 
 
 def profile(prompt, draft_model, model, max_new_tokens=10000):
@@ -178,7 +180,14 @@ def simple_generate(prompt, draft_model, max_new_tokens=1000):
 
 if __name__ == "__main__":
     run_hybrid_generation(
-        input, draft_model, model, threshold=0.5, max_new_tokens=2000, verbose=False
+        input,
+        slm,
+        llm,
+        # "entropy",
+        "semantic_enhanced_route",
+        threshold=0.2,
+        max_new_tokens=30000,
+        verbose=False,
     )
     # profile(input, draft_model, None, 2000)
     # simple_generate(input, draft_model, 2000)

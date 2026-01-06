@@ -24,8 +24,8 @@ dependencies = [
 Homepage = "https://github.com/GeeeekExplorer/nano-vllm"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["nanovllm*"]
+include = ["nanovllm*", "hybrid_generator*"]
 
+where = ["."]
 [tool.ruff.lint]
 extend-select = ["I"]

@@ -13,10 +13,11 @@ from typing import Literal, cast
 import torch
 from transformers import AutoTokenizer
 
-from hybrid_generator.backends import NanovLLMBackend
+from hybrid_generator.backends import HybridBackend as HGHybridBackend, NanovLLMBackend
 from hybrid_generator.profiling import ProfileResult
 from hybrid_generator.strategies import (
     EntropyStrategy,
+    SemanticEnhancedRouteStrategy,
     SpeculativeStrategy,
     calculate_token_entropy,
     compute_logu,
@@ -39,6 +40,7 @@ class HybridGenerator:
     - speculative: Standard speculative decoding with sampling
     - uncertainty: Route to LLM when aleatoric uncertainty is high
     - entropy: Route to LLM when entropy is high
+    - semantic_enhanced_route: Route within <think>...</think>, then SLM-only
 
     Example:
         >>> generator = HybridGenerator(
@@ -63,6 +65,7 @@ class HybridGenerator:
         verbose: bool = False,
         report_live_metrics: bool = False,
         enable_stats_sync: bool = False,
+        use_hybrid_backend: bool = True,
     ):
         """
         Initialize the hybrid generator.
@@ -74,12 +77,14 @@ class HybridGenerator:
             dtype: Data type for models (e.g., torch.float16, torch.bfloat16)
             verbose: Whether to print generated tokens in real-time (default: False)
             report_live_metrics: Whether to report live metrics every 100 tokens (default: False)
+            use_hybrid_backend: Use a shared HybridBackend for SLM/LLM (default: True)
         """
         self.device = device
         self.dtype = dtype
         self.verbose = verbose
         self.report_live_metrics = report_live_metrics
         self.enable_stats_sync = enable_stats_sync
+        self.hybrid_backend_wrapper = None
 
         if slm_model_id is None and llm_model_id is None:
             raise ValueError(
@@ -95,44 +100,55 @@ class HybridGenerator:
             self.tokenizer = AutoTokenizer.from_pretrained(slm_model_id)
 
         # Load backend
+        slm_kwargs = None
+        llm_kwargs = None
+        if slm_model_id is not None:
+            slm_kwargs = {
+                "device": device,
+                "dtype": dtype,
+                "gpu_memory_utilization": slm_memory_usage,
+                "max_num_seqs": 1,
+                "enable_stats_sync": enable_stats_sync,
+            }
+
+        if llm_model_id is not None:
+            llm_kwargs = {
+                "device": device,
+                "dtype": dtype,
+                "gpu_memory_utilization": llm_memory_usage,
+                "max_num_seqs": 1,
+                "enable_stats_sync": enable_stats_sync,
+            }
+
         if slm_model_id is not None:
             print(f"Loading SLM: {slm_model_id}")
-            self.slm = NanovLLMBackend(
-                slm_model_id,
-                device=device,
-                dtype=dtype,
-                gpu_memory_utilization=slm_memory_usage,
-                max_num_seqs=1,
-                enable_stats_sync=enable_stats_sync,
-            )
+            self.slm = NanovLLMBackend(slm_model_id, **slm_kwargs)
 
         if llm_model_id is not None:
             print(f"Loading LLM: {llm_model_id}")
-            # self.llm = AutoModelForCausalLM.from_pretrained(
-            #     llm_model_id, torch_dtype=dtype
-            # ).to(device)
-            # self.llm.eval()
-            self.llm = NanovLLMBackend(
-                llm_model_id,
-                device=device,
-                dtype=dtype,
-                max_num_seqs=1,
-                gpu_memory_utilization=llm_memory_usage,
-                enable_stats_sync=enable_stats_sync,
-            )
+            self.llm = NanovLLMBackend(llm_model_id, **llm_kwargs)
+
+        if use_hybrid_backend and hasattr(self, "slm") and hasattr(self, "llm"):
+            self.hybrid_backend_wrapper = HGHybridBackend(self.slm, self.llm)
 
         # Initialize strategies
         self.strategies = {
             "speculative": SpeculativeStrategy(),
             # "uncertainty": UncertaintyStrategy(),
             "entropy": EntropyStrategy(),
+            "semantic_enhanced_route": SemanticEnhancedRouteStrategy(),
         }
 
     @torch.inference_mode()
     def generate(
         self,
         prompt: str,
-        strategy: Literal["speculative", "uncertainty", "entropy"] = "speculative",
+        strategy: Literal[
+            "speculative",
+            "uncertainty",
+            "entropy",
+            "semantic_enhanced_route",
+        ] = "entropy",
         max_new_tokens: int = 2000,
         # Sampling parameters
         temperature: float = 0.6,
@@ -152,6 +168,7 @@ class HybridGenerator:
                 - "speculative": SLM drafts tokens, LLM verifies in parallel
                 - "uncertainty": Route to LLM when SLM is uncertain
                 - "entropy": Route to LLM when SLM output has high entropy
+                - "semantic_enhanced_route": Route within <think>...</think>, then SLM-only
             max_new_tokens: Maximum number of tokens to generate
             temperature: Sampling temperature (higher = more random)
             top_k: Top-k filtering (0 = disabled)
@@ -174,13 +191,17 @@ class HybridGenerator:
                 f"Available strategies: {list(self.strategies.keys())}"
             )
 
+        if self.hybrid_backend_wrapper is None:
+            raise ValueError(
+                "HybridGenerator requires both SLM and LLM for strategies."
+            )
+
         # Get the strategy implementation
         strategy_impl = self.strategies[strategy]
 
         # Generate using the strategy
         result, stats = strategy_impl.generate(
-            slm=self.slm,
-            llm=self.llm,
+            hybrid_backend=self.hybrid_backend_wrapper,
             tokenizer=self.tokenizer,
             prompt=prompt,
             max_new_tokens=max_new_tokens,
@@ -248,6 +269,7 @@ class HybridGenerator:
         top_k: int = 20,
         top_p: float = 0.95,
         min_p: float = 0.0,
+        stop_strings: list[str] | None = None,
     ) -> ProfileResult:
         """
         Generate text with detailed profiling of each token.
@@ -263,11 +285,15 @@ class HybridGenerator:
             top_k: Top-k filtering
             top_p: Nucleus sampling threshold
             min_p: Minimum probability threshold
+            stop_strings: Optional stop strings that end generation (lm-eval style)
 
         Returns:
             ProfileResult object containing generated text and detailed statistics
 
         """
+
+        assert self.slm is not None, "SLM backend must be initialized for profiling."
+
         # Initialize profiling result
         profile = ProfileResult(
             generated_text="", strategy="profiled_slm_only", total_time=0.0
@@ -279,9 +305,20 @@ class HybridGenerator:
         prompt_len = len(prompt_ids)
         generated_ids = list(prompt_ids)
 
-        eos_token_ids = (
-            [self.tokenizer.eos_token_id] if self.tokenizer.eos_token_id else []
-        )
+        eos_token_id = self.tokenizer.eos_token_id
+        if eos_token_id is None and getattr(self.tokenizer, "eos_token", None):
+            eos_token_id = self.tokenizer.convert_tokens_to_ids(
+                self.tokenizer.eos_token
+            )
+        if isinstance(eos_token_id, list):
+            eos_token_ids = [eid for eid in eos_token_id if eid is not None]
+        elif eos_token_id is not None:
+            eos_token_ids = [eos_token_id]
+        else:
+            eos_token_ids = []
+
+        stop_strings = [s for s in (stop_strings or []) if s]
+        stop_text: str | None = None
 
         # Initialize backend session
         req_id = random.randint(0, 2**31 - 1)
@@ -310,7 +347,7 @@ class HybridGenerator:
                 entropy = entropy.item()
 
             top_k_probs = None
-            next_token = sample_token_flashinfer(
+            next_token = sample_token(
                 token_logits.unsqueeze(0), temperature, top_k, top_p
             )
             slm_tokens += 1
@@ -349,6 +386,18 @@ class HybridGenerator:
             if token_id in eos_token_ids:
                 break
 
+            if stop_strings:
+                completion_text = self.tokenizer.decode(
+                    generated_ids[prompt_len:], skip_special_tokens=False
+                )
+                for stop_str in stop_strings:
+                    if stop_str in completion_text:
+                        stop_idx = completion_text.index(stop_str)
+                        stop_text = completion_text[:stop_idx]
+                        break
+                if stop_text is not None:
+                    break
+
             # Prepare logits for next step
             next_logits = self.slm.forward(req_id, [token_id])
 
@@ -357,9 +406,15 @@ class HybridGenerator:
         end_time = time.time()
 
         # Finalize profile
-        profile.generated_text = self.tokenizer.decode(
-            generated_ids, skip_special_tokens=True
-        )
+        if stop_text is None:
+            profile.generated_text = self.tokenizer.decode(
+                generated_ids, skip_special_tokens=True
+            )
+        else:
+            prompt_text = self.tokenizer.decode(
+                prompt_ids, skip_special_tokens=True
+            )
+            profile.generated_text = prompt_text + stop_text
         profile.total_time = end_time - start_time
         profile.stats = {
             "total_tokens": len(profile.tokens),
@@ -373,7 +428,100 @@ class HybridGenerator:
         )
         print(f"Speed: {len(profile.tokens) / max(profile.total_time, 1e-9):.2f} tok/s")
 
+        self.slm.free(req_id)
+
         return profile
+
+    @torch.inference_mode()
+    def generate_with_profile_calibration(
+        self,
+        prompts: list[str] | str,
+        max_new_tokens: int = 200,
+        # Sampling parameters
+        temperature: float = 0.6,
+        top_k: int = 20,
+        top_p: float = 0.95,
+        min_p: float = 0.0,
+        stop_strings: list[str] | None = None,
+        # Analysis parameters
+        metric: Literal["entropy", "uncertainty"] = "entropy",
+        percentiles: list[int] | None = None,
+        return_profiles: bool = False,
+    ) -> dict:
+        """
+        Profile a calibration set by running generate_with_profile for each prompt.
+
+        Aggregates the metric distribution across all generated tokens and returns
+        percentile thresholds (top-X%) for the calibration set.
+
+        Args:
+            prompts: List of prompts (or a single prompt string)
+            max_new_tokens: Maximum number of tokens to generate per prompt
+            temperature: Sampling temperature
+            top_k: Top-k filtering
+            top_p: Nucleus sampling threshold
+            min_p: Minimum probability threshold
+            stop_strings: Optional stop strings that end generation (lm-eval style)
+            metric: Which metric to aggregate ("entropy" or "uncertainty")
+            percentiles: Percentiles to compute (default matches ProfileResult)
+            return_profiles: Whether to include per-prompt ProfileResult objects
+
+        Returns:
+            Dict with aggregated analysis and optional per-prompt profiles
+        """
+        if isinstance(prompts, str):
+            prompts = [prompts]
+
+        if not prompts:
+            raise ValueError("prompts must contain at least one prompt.")
+
+        profiles: list[ProfileResult] = []
+        total_time = 0.0
+        all_tokens = []
+
+        for idx, prompt in enumerate(prompts, 1):
+            print(f"\n--- Profiling prompt {idx}/{len(prompts)} ---")
+            profile = self.generate_with_profile(
+                prompt=prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                min_p=min_p,
+                stop_strings=stop_strings,
+            )
+            profiles.append(profile)
+            total_time += profile.total_time
+            all_tokens.extend(profile.tokens)
+
+        combined_profile = ProfileResult(
+            generated_text="",
+            strategy="profiled_slm_only_calibration",
+            total_time=total_time,
+        )
+        combined_profile.tokens = all_tokens
+        combined_profile.stats = {
+            "total_tokens": len(all_tokens),
+            "prompt_count": len(prompts),
+            "enable_routing": False,
+        }
+
+        metric_analysis = combined_profile.analyze_distribution(
+            metric=metric,
+            percentiles=percentiles,
+        )
+
+        result = {
+            "metric": metric,
+            "analysis": metric_analysis,
+            "total_tokens": len(all_tokens),
+            "prompt_count": len(prompts),
+            "total_time": total_time,
+        }
+        if return_profiles:
+            result["profiles"] = profiles
+
+        return result
 
     @torch.inference_mode()
     def simple_generate_with_slm(
@@ -420,7 +568,7 @@ class HybridGenerator:
 
             # Use last logits to sample next token
             token_logits = logits[-1, :]
-            next_token, _ = sample_token(
+            next_token = sample_token(
                 token_logits.unsqueeze(0), temperature, top_k, top_p, min_p
             )
             token_id = cast(int, next_token.item())

@@ -156,21 +156,14 @@ class ProfileResult:
             "max": float(np.max(values)),
             "median": float(np.median(values)),
             "percentiles": {},
-            "top_10_percent": {
-                "mean": float(np.mean(sorted_values[: max(1, len(values) // 10)])),
-                "min": float(sorted_values[0]),
-                "max": float(
-                    sorted_values[min(len(values) - 1, len(values) // 10 - 1)]
-                ),
-            },
         }
 
-        # Compute percentiles (from high to low)
+        # Compute thresholds for top-X% (from high to low).
         for p in percentiles:
-            # p-th percentile from the top
-            idx = int(len(sorted_values) * p / 100)
-            if idx < len(sorted_values):
-                analysis["percentiles"][f"top_{p}%"] = float(sorted_values[idx])
+            top_count = int(np.ceil(len(sorted_values) * p / 100))
+            top_count = min(len(sorted_values), max(1, top_count))
+            idx = top_count - 1
+            analysis["percentiles"][f"top_{p}%"] = float(sorted_values[idx])
 
         return analysis
 
@@ -292,12 +285,6 @@ class ProfileResult:
         print(f"  Mean: {analysis['mean']:.4f} ± {analysis['std']:.4f} (std)")
         print(f"  Range: [{analysis['min']:.4f}, {analysis['max']:.4f}]")
         print(f"  Median: {analysis['median']:.4f}")
-
-        print("\n  Top 10% tokens:")
-        print(
-            f"    Mean: {analysis['top_10_percent']['mean']:.4f}, "
-            f"Range: [{analysis['top_10_percent']['min']:.4f}, {analysis['top_10_percent']['max']:.4f}]"
-        )
 
         print("\n  Percentiles (from highest):")
         for percentile, value in sorted(analysis["percentiles"].items()):

@@ -7,8 +7,13 @@ from nanovllm.sampling_params import SamplingParams
 
 
 class NanovLLMBackend(ModelBackend):
-    def __init__(self, model, **kwargs):
-        self.backend = Backend(model, **kwargs)
+    def __init__(self, model: str | None = None, *, backend: Backend | None = None, **kwargs):
+        if backend is None:
+            if model is None:
+                raise ValueError("NanovLLMBackend requires a model or a backend.")
+            self.backend = Backend(model, **kwargs)
+        else:
+            self.backend = backend
 
     def exit(self):
         self.backend.exit()

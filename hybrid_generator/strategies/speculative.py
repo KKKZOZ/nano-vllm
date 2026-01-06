@@ -1,17 +1,17 @@
+import random
 import time
-import uuid
 from typing import cast
 
 import torch
 
-from hybrid_generator.backends import ModelBackend
+from hybrid_generator.backends import BackendId, HybridBackend
 from hybrid_generator.strategies.base import GenerationStrategy
-from hybrid_generator.strategies.utils import sample_token
+from hybrid_generator.strategies.utils import get_sampling_probs, sample_token
 
 
 class SpeculativeStrategy(GenerationStrategy):
     """
-    Speculative decoding strategy adapted for ModelBackend interface.
+    Speculative decoding strategy adapted for HybridBackend interface.
 
     This implementation delegates KV cache management to the backend,
     making it compatible with Transformers, vLLM, or SGLang backends.
@@ -19,8 +19,7 @@ class SpeculativeStrategy(GenerationStrategy):
 
     def generate(
         self,
-        slm: ModelBackend,
-        llm: ModelBackend,
+        hybrid_backend: HybridBackend,
         tokenizer,
         prompt: str,
         max_new_tokens: int,
@@ -33,11 +32,13 @@ class SpeculativeStrategy(GenerationStrategy):
         verbose: bool = False,
         **kwargs,
     ) -> tuple[str, dict]:
-        """Generate using speculative decoding with ModelBackend."""
+        """Generate using speculative decoding with HybridBackend."""
+        if not isinstance(hybrid_backend, HybridBackend):
+            raise ValueError("SpeculativeStrategy requires a HybridBackend instance.")
 
         # 1. Initialize Session
         # Use a unique ID to manage state in the backend
-        req_id = str(uuid.uuid4())
+        req_id = random.randint(0, 2**31 - 1)
 
         # 2. Prefill Phase
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -46,11 +47,11 @@ class SpeculativeStrategy(GenerationStrategy):
 
         # Forward prompt to both models to populate initial KV cache
         # Backend returns logits for all input tokens
-        _ = slm.forward(req_id, input_ids)
-        llm_logits_all = llm.forward(req_id, input_ids)
+        _ = hybrid_backend.forward(BackendId.SLM, req_id, input_ids)
+        llm_logits_all = hybrid_backend.forward(BackendId.LLM, req_id, input_ids)
 
         # Sample first token from LLM (using the last logit)
-        token_id, _ = sample_token(
+        token_id = sample_token(
             llm_logits_all[-1, :].unsqueeze(0), temperature, top_k, top_p, min_p
         )
 
@@ -95,10 +96,13 @@ class SpeculativeStrategy(GenerationStrategy):
             for _ in range(num_drafts):
                 # Forward 1 token -> Append to SLM cache -> Get 1 logit
                 # Note: This automatically handles 'past_key_values' inside backend
-                logits = slm.forward(req_id, [next_input_id])
+                logits = hybrid_backend.forward(BackendId.SLM, req_id, [next_input_id])
 
                 # Sample draft token
-                next_token_tensor, probs = sample_token(
+                next_token_tensor = sample_token(
+                    logits[-1, :].unsqueeze(0), temperature, top_k, top_p, min_p
+                )
+                probs = get_sampling_probs(
                     logits[-1, :].unsqueeze(0), temperature, top_k, top_p, min_p
                 )
                 next_input_id = next_token_tensor.item()
@@ -117,7 +121,9 @@ class SpeculativeStrategy(GenerationStrategy):
             # Returns logits for [anchor, d1, d2, ...]
             # anchor's logit -> predicts d1
             # d1's logit -> predicts d2
-            llm_logits_all = llm.forward(req_id, verify_input_ids)
+            llm_logits_all = hybrid_backend.forward(
+                BackendId.LLM, req_id, verify_input_ids
+            )
 
             # --- C. Rejection Sampling ---
             accept_count = 0
@@ -172,7 +178,7 @@ class SpeculativeStrategy(GenerationStrategy):
             if accept_count == num_drafts:
                 # Last logit corresponds to prediction after the last draft
                 last_logit = llm_logits_all[-1, :]
-                bonus_token_tensor, _ = sample_token(
+                bonus_token_tensor = sample_token(
                     last_logit.unsqueeze(0), temperature, top_k, top_p, min_p
                 )
                 bonus_token_id = bonus_token_tensor.item()
@@ -193,8 +199,8 @@ class SpeculativeStrategy(GenerationStrategy):
             # Even if we accepted all, we might need to sync if SLM ran ahead differently (rare here)
             # or simply to confirm the state logic.
             # If we rejected, this cuts off the bad branch.
-            slm.rollback(req_id, new_cache_len)
-            llm.rollback(req_id, new_cache_len)
+            hybrid_backend.rollback(BackendId.SLM, req_id, new_cache_len)
+            hybrid_backend.rollback(BackendId.LLM, req_id, new_cache_len)
 
             cache_len = new_cache_len
 
@@ -222,8 +228,8 @@ class SpeculativeStrategy(GenerationStrategy):
                 break
 
         # 4. Cleanup
-        slm.free(req_id)
-        llm.free(req_id)
+        hybrid_backend.free(BackendId.SLM, req_id)
+        hybrid_backend.free(BackendId.LLM, req_id)
 
         if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()

@@ -15,9 +15,19 @@ from transformers.cache_utils import DynamicCache
 
 # Allow imports when executed as a package or as standalone scripts
 try:
-    from .utils import calculate_token_entropy, compute_logu, sample_token
+    from .utils import (
+        calculate_token_entropy,
+        compute_logu,
+        get_sampling_probs,
+        sample_token,
+    )
 except ImportError:
-    from utils import calculate_token_entropy, compute_logu, sample_token
+    from utils import (
+        calculate_token_entropy,
+        compute_logu,
+        get_sampling_probs,
+        sample_token,
+    )
 
 
 class LiveMetricsTracker:
@@ -214,9 +224,10 @@ class SpeculativeStrategy(GenerationStrategyV0):
         )
 
         # Sample first token from LLM
-        token, _ = sample_token(
+        token = sample_token(
             llm_outputs.logits[:, -1, :], temperature, top_k, top_p, min_p
         )
+        token = token.to(inputs["input_ids"].dtype).unsqueeze(-1)
         generated_ids = torch.cat([inputs["input_ids"], token], dim=-1)
         offset = prompt_len
 
@@ -255,7 +266,11 @@ class SpeculativeStrategy(GenerationStrategyV0):
                     use_cache=True,
                     cache_position=cache_pos,
                 )
-                next_token, probs = sample_token(
+                next_token = sample_token(
+                    outputs.logits[:, -1, :], temperature, top_k, top_p, min_p
+                )
+                next_token = next_token.to(token.dtype).unsqueeze(-1)
+                probs = get_sampling_probs(
                     outputs.logits[:, -1, :], temperature, top_k, top_p, min_p
                 )
                 draft_tokens.append(next_token)
@@ -282,7 +297,7 @@ class SpeculativeStrategy(GenerationStrategyV0):
             accepted_tokens = []
 
             for i in range(num_drafts):
-                _, llm_probs = sample_token(
+                llm_probs = get_sampling_probs(
                     llm_logits[i].unsqueeze(0), temperature, top_k, top_p, min_p
                 )
                 draft_token_id = draft_tokens[i].item()
@@ -314,7 +329,7 @@ class SpeculativeStrategy(GenerationStrategyV0):
 
             # Bonus token if all accepted
             if accept_count == num_drafts:
-                _, llm_probs = sample_token(
+                llm_probs = get_sampling_probs(
                     llm_logits[-1].unsqueeze(0), temperature, top_k, top_p, min_p
                 )
                 bonus_token = torch.multinomial(llm_probs, num_samples=1)
@@ -461,6 +476,9 @@ class UncertaintyStrategy(GenerationStrategyV0):
         # Helper function to process a generated token
         def _process_token(next_token, model_used, entropy_val, uncertainty_val):
             nonlocal generated_ids, offset
+            if next_token.dim() == 1:
+                next_token = next_token.unsqueeze(-1)
+            next_token = next_token.to(generated_ids.dtype)
             generated_ids = torch.cat([generated_ids, next_token], dim=-1)
             offset += 1
 
@@ -492,7 +510,7 @@ class UncertaintyStrategy(GenerationStrategyV0):
 
         if aleatoric_uncertainty < threshold:
             # Use SLM for first token
-            first_token, _ = sample_token(slm_logits, temperature, top_k, top_p, min_p)
+            first_token = sample_token(slm_logits, temperature, top_k, top_p, min_p)
             slm_tokens += 1
             slm_cache_pos += 1
             _process_token(first_token, "slm", token_entropy, aleatoric_uncertainty)
@@ -516,9 +534,7 @@ class UncertaintyStrategy(GenerationStrategyV0):
                     )
                     llm_logits = llm_outputs.logits[:, -1, :]
 
-                first_token, _ = sample_token(
-                    llm_logits, temperature, top_k, top_p, min_p
-                )
+                first_token = sample_token(llm_logits, temperature, top_k, top_p, min_p)
                 llm_tokens += 1
                 llm_cache_pos += 1
 
@@ -571,9 +587,7 @@ class UncertaintyStrategy(GenerationStrategyV0):
             # Route based on uncertainty
             if aleatoric_uncertainty < threshold:
                 # Use SLM
-                next_token, _ = sample_token(
-                    slm_logits, temperature, top_k, top_p, min_p
-                )
+                next_token = sample_token(slm_logits, temperature, top_k, top_p, min_p)
                 slm_tokens += 1
 
                 if _process_token(
@@ -611,7 +625,7 @@ class UncertaintyStrategy(GenerationStrategyV0):
                         use_cache=True,
                         cache_position=llm_cache_pos_tensor,
                     )
-                    next_token, _ = sample_token(
+                    next_token = sample_token(
                         llm_outputs.logits[:, -1, :], temperature, top_k, top_p, min_p
                     )
                     llm_tokens += 1
@@ -723,6 +737,9 @@ class EntropyStrategy(GenerationStrategyV0):
         # Helper function
         def _process_token(next_token, model_used, entropy_val, uncertainty_val):
             nonlocal generated_ids, offset
+            if next_token.dim() == 1:
+                next_token = next_token.unsqueeze(-1)
+            next_token = next_token.to(generated_ids.dtype)
             generated_ids = torch.cat([generated_ids, next_token], dim=-1)
             offset += 1  # 更新总长度
 
@@ -760,7 +777,7 @@ class EntropyStrategy(GenerationStrategyV0):
 
             if not use_llm:
                 # === SLM Generation Branch ===
-                next_token, _ = sample_token(
+                next_token = sample_token(
                     current_slm_logits, temperature, top_k, top_p, min_p
                 )
                 slm_tokens += 1
@@ -819,7 +836,7 @@ class EntropyStrategy(GenerationStrategyV0):
                         llm_next_logits = llm_outputs.logits[:, -1, :]
 
                     # 采样
-                    next_token, _ = sample_token(
+                    next_token = sample_token(
                         llm_next_logits, temperature, top_k, top_p, min_p
                     )
                     llm_tokens += 1

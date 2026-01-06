@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from hybrid_generator.backends import ModelBackend
+from hybrid_generator.backends import HybridBackend
 
 
 class GenerationStrategy(ABC):
@@ -9,8 +9,7 @@ class GenerationStrategy(ABC):
     @abstractmethod
     def generate(
         self,
-        slm: ModelBackend,
-        llm: ModelBackend,
+        hybrid_backend: HybridBackend,
         tokenizer,
         prompt: str,
         max_new_tokens: int,

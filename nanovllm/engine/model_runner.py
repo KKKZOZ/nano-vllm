@@ -434,6 +434,8 @@ class ModelRunner:
         self.graph_pool = None
 
         logger.info(f"Capturing CUDA graphs for batch sizes: {self.graph_bs}")
+        torch.cuda.synchronize()
+        free_before_decode, _ = torch.cuda.mem_get_info()
         # CUDA graph capture for decode
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
@@ -451,6 +453,10 @@ class ModelRunner:
             self.graphs[bs] = graph
             torch.cuda.synchronize()
             reset_context()
+        torch.cuda.synchronize()
+        free_after_decode, _ = torch.cuda.mem_get_info()
+        decode_graphs_mb = (free_before_decode - free_after_decode) / (1024 * 1024)
+        logger.info(f"Decode CUDA graphs total: {decode_graphs_mb:.2f} MB")
 
         self.graph_vars = dict(
             input_ids=input_ids,
@@ -476,8 +482,10 @@ class ModelRunner:
             extend_outputs = torch.zeros(max_extend_len, hf_config.hidden_size)
 
             logger.info(
-                f"Capturing CUDA graphs for extend lengths: {self.extend_graph_len}"
+                f"Capturing CUDA graphs for extend lengths: 1-{max(self.extend_graph_len)}"
             )
+            torch.cuda.synchronize()
+            free_before_extend, _ = torch.cuda.mem_get_info()
             for length in reversed(self.extend_graph_len):
                 graph = torch.cuda.CUDAGraph()
 
@@ -504,6 +512,10 @@ class ModelRunner:
                 self.extend_graphs[length] = graph
                 torch.cuda.synchronize()
                 reset_context()
+            torch.cuda.synchronize()
+            free_after_extend, _ = torch.cuda.mem_get_info()
+            extend_graphs_mb = (free_before_extend - free_after_extend) / (1024 * 1024)
+            logger.info(f"Extend CUDA graphs total: {extend_graphs_mb:.2f} MB")
 
             self.extend_graph_vars = dict(
                 input_ids=extend_input_ids,

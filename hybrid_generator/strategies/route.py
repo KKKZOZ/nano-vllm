@@ -4,20 +4,22 @@ from typing import Tuple, cast
 
 import torch
 
-from hybrid_generator.backends import ModelBackend
+from hybrid_generator.backends import BackendId, HybridBackend
 from hybrid_generator.strategies.base import GenerationStrategy
 from hybrid_generator.strategies.metrics import LiveMetricsTracker
 from hybrid_generator.strategies.utils import (
     calculate_token_entropy,
+    sample_token,
     sample_token_flashinfer,
     calculate_token_entropy_fast,
+    calculate_token_entropy_triton,
 )
 
 
 # TODO: refactor to RouteStrategy base class
 class EntropyStrategy(GenerationStrategy):
     """
-    Entropy-based routing strategy adapted for ModelBackend.
+    Entropy-based routing strategy adapted for HybridBackend.
 
     Routes to LLM when SLM's output entropy exceeds threshold.
     State management is delegated to the backend.
@@ -25,8 +27,7 @@ class EntropyStrategy(GenerationStrategy):
 
     def generate(
         self,
-        slm: ModelBackend,
-        llm: ModelBackend,
+        hybrid_backend: HybridBackend,
         tokenizer,
         prompt: str,
         max_new_tokens: int,
@@ -41,7 +42,9 @@ class EntropyStrategy(GenerationStrategy):
         report_live_metrics: bool = False,
         **kwargs,
     ) -> Tuple[str, dict]:
-        """Generate using entropy-based routing with ModelBackend."""
+        """Generate using entropy-based routing with HybridBackend."""
+        if not isinstance(hybrid_backend, HybridBackend):
+            raise ValueError("EntropyStrategy requires a HybridBackend instance.")
 
         # 1. Initialize Session
         # Use a unique ID to let backends manage their own KV caches
@@ -59,11 +62,11 @@ class EntropyStrategy(GenerationStrategy):
 
         # Prefill both models
         # SLM: Must return logits to calculate initial entropy
-        slm_logits_all = slm.forward(req_id, input_ids)
+        slm_logits_all = hybrid_backend.forward(BackendId.SLM, req_id, input_ids)
         current_slm_logits = slm_logits_all[-1, :]  # Logits for the first new token
 
         # LLM: Just prefill to warm up the cache (return value ignored for now)
-        _ = llm.forward(req_id, input_ids)
+        _ = hybrid_backend.forward(BackendId.LLM, req_id, input_ids)
 
         # Track global generation state
         generated_ids = list(input_ids)
@@ -129,7 +132,9 @@ class EntropyStrategy(GenerationStrategy):
 
                 # 2. Update SLM State (Forward 1 step)
                 # Input: [new_token] -> Output: logits for NEXT token
-                current_slm_logits = slm.forward(req_id, [next_token_id])[-1, :]
+                current_slm_logits = hybrid_backend.forward(
+                    BackendId.SLM, req_id, [next_token_id]
+                )[-1, :]
                 slm_synced_len += 1
 
                 # LLM is now lagging behind by 1 token
@@ -147,7 +152,9 @@ class EntropyStrategy(GenerationStrategy):
                 if catchup_tokens:
                     # Feed missing history. The return value is the logits for the
                     # NEXT token (the one we are about to generate).
-                    llm_next_logits = llm.forward(req_id, catchup_tokens)[-1, :]
+                    llm_next_logits = hybrid_backend.forward(
+                        BackendId.LLM, req_id, catchup_tokens
+                    )[-1, :]
                     llm_synced_len += len(catchup_tokens)
                 else:
                     # Rare case: consecutive LLM calls or first step
@@ -167,9 +174,9 @@ class EntropyStrategy(GenerationStrategy):
                     # If we don't have logits (e.g. 2nd token in block), run forward
                     if llm_next_logits is None:
                         # Forward the PREVIOUS token to get logits for CURRENT
-                        llm_next_logits = llm.forward(req_id, [generated_ids[-1]])[
-                            -1, :
-                        ]
+                        llm_next_logits = hybrid_backend.forward(
+                            BackendId.LLM, req_id, [generated_ids[-1]]
+                        )[-1, :]
                         llm_synced_len += 1
 
                     # Sample
@@ -202,13 +209,15 @@ class EntropyStrategy(GenerationStrategy):
             if missing_tokens:
                 # Feed all new tokens to SLM
                 # The last logit corresponds to the prediction for the upcoming token
-                slm_logits_all = slm.forward(req_id, missing_tokens)
+                slm_logits_all = hybrid_backend.forward(
+                    BackendId.SLM, req_id, missing_tokens
+                )
                 current_slm_logits = slm_logits_all[-1, :]
                 slm_synced_len += len(missing_tokens)
 
         # 4. Cleanup
-        slm.free(req_id)
-        llm.free(req_id)
+        hybrid_backend.free(BackendId.SLM, req_id)
+        hybrid_backend.free(BackendId.LLM, req_id)
 
         if enable_stats_sync and device.startswith("cuda"):
             torch.cuda.synchronize()

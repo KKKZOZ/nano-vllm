@@ -273,16 +273,11 @@ print(f"范围: [{analysis['min']:.4f}, {analysis['max']:.4f}]")
 
 # 从高到低的分位数
 print("\n分位数 (从最高值开始):")
+# Top 10% 表示最高 10% 中的最小值
 print(f"  Top 10%: {analysis['percentiles']['top_10%']:.4f}")
 print(f"  Top 20%: {analysis['percentiles']['top_20%']:.4f}")
 print(f"  Top 30%: {analysis['percentiles']['top_30%']:.4f}")
 print(f"  中位数: {analysis['median']:.4f}")
-
-# Top 10% 的统计
-print(f"\nTop 10% tokens:")
-print(f"  平均值: {analysis['top_10_percent']['mean']:.4f}")
-print(f"  范围: [{analysis['top_10_percent']['min']:.4f}, "
-      f"{analysis['top_10_percent']['max']:.4f}]")
 ```
 
 ### 输出示例
@@ -306,9 +301,6 @@ Uncertainty Distribution:
   Mean: 0.3245 ± 0.1823 (std)
   Range: [0.0512, 0.8934]
   Median: 0.2876
-
-  Top 10% tokens:
-    Mean: 0.7234, Range: [0.6123, 0.8934]
 
   Percentiles (from highest):
     top_10%: 0.6123

@@ -10,12 +10,71 @@ This module contains helper functions for:
 import time
 from typing import Tuple, Union
 
+import triton
+import triton.language as tl
+
 import flashinfer
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.cache_utils import DynamicCache
+from nanovllm.utils.logger import logger
+
+
+def _apply_sampling_filters(
+    logits: torch.Tensor,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+) -> torch.Tensor:
+    if min_p > 0.0:
+        probs = F.softmax(logits, dim=-1)
+        max_probs = probs.max(dim=-1, keepdim=True).values
+        min_p_threshold = max_probs * min_p
+        logits = torch.where(
+            probs >= min_p_threshold,
+            logits,
+            torch.tensor(float("-inf"), device=logits.device, dtype=logits.dtype),
+        )
+
+    if top_k > 0:
+        top_k = min(top_k, logits.size(-1))
+        top_k_logits, top_k_indices = torch.topk(logits, top_k, dim=-1)
+        logits = torch.full_like(logits, float("-inf"))
+        logits.scatter_(-1, top_k_indices, top_k_logits)
+
+    if top_p < 1.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        sorted_indices_to_remove = cumulative_probs > top_p
+        sorted_indices_to_remove[..., 0] = False
+        indices_to_remove = sorted_indices_to_remove.scatter(
+            -1, sorted_indices, sorted_indices_to_remove
+        )
+        logits = logits.masked_fill(indices_to_remove, float("-inf"))
+
+    return logits
+
+
+def get_sampling_probs(
+    logits: torch.Tensor,
+    temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 1.0,
+    min_p: float = 0.0,
+) -> torch.Tensor:
+    """
+    Return the sampling probability distribution after applying filtering.
+    """
+    if temperature <= 0.0:
+        return F.softmax(logits, dim=-1)
+
+    if temperature != 1.0:
+        logits = logits / temperature
+
+    logits = _apply_sampling_filters(logits, top_k, top_p, min_p)
+    return F.softmax(logits, dim=-1)
 
 
 @torch.compile()
@@ -25,7 +84,7 @@ def sample_token(
     top_k: int = 0,
     top_p: float = 1.0,
     min_p: float = 0.0,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     Sample a token from logits with temperature, top-k, top-p, and min-p filtering.
 
@@ -37,56 +96,19 @@ def sample_token(
         min_p: Minimum probability threshold relative to the max probability
 
     Returns:
-        tuple of (sampled_token, probabilities) where:
-        - sampled_token: shape [batch_size, 1]
-        - probabilities: shape [batch_size, vocab_size]
+        sampled_token: shape [batch_size]
     """
-    # Apply temperature
-    if temperature > 0:
+    if temperature <= 0.0:
+        return logits.argmax(dim=-1).to(torch.int32)
+
+    if temperature != 1.0:
         logits = logits / temperature
-    else:
-        # Temperature = 0 means greedy
-        return logits.argmax(dim=-1, keepdim=True), F.softmax(logits, dim=-1)
 
-    # Apply min-p filtering
-    if min_p > 0.0:
-        probs = F.softmax(logits, dim=-1)
-        max_probs = probs.max(dim=-1, keepdim=True).values
-        min_p_threshold = max_probs * min_p
-        logits = torch.where(
-            probs >= min_p_threshold,
-            logits,
-            torch.tensor(float("-inf")).to(logits.device),
-        )
-
-    # Apply top-k filtering
-    if top_k > 0:
-        top_k = min(top_k, logits.size(-1))
-        top_k_logits, top_k_indices = torch.topk(logits, top_k, dim=-1)
-        logits = torch.full_like(logits, float("-inf"))
-        logits.scatter_(-1, top_k_indices, top_k_logits)
-
-    # Apply top-p (nucleus) filtering
-    if top_p < 1.0:
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-        # Remove tokens with cumulative probability above the threshold
-        sorted_indices_to_remove = cumulative_probs > top_p
-        # Keep at least one token
-        sorted_indices_to_remove[..., 0] = False
-
-        # Scatter back to original indices
-        indices_to_remove = sorted_indices_to_remove.scatter(
-            -1, sorted_indices, sorted_indices_to_remove
-        )
-        logits = logits.masked_fill(indices_to_remove, float("-inf"))
-
-    # Sample from the filtered distribution
+    logits = _apply_sampling_filters(logits, top_k, top_p, min_p)
     probs = F.softmax(logits, dim=-1)
-    sampled_token = torch.multinomial(probs, num_samples=1)
+    sampled_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
 
-    return sampled_token, probs
+    return sampled_token.to(torch.int32)
 
 
 @torch.compile(fullgraph=True)
@@ -96,7 +118,7 @@ def sample_token_optimized(
     top_k: int = 0,
     top_p: float = 1.0,
     min_p: float = 0.0,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     Optimized sampling:
     1. Fuses steps to reduce memory I/O.
@@ -107,7 +129,7 @@ def sample_token_optimized(
     if abs(temperature - 1.0) > 1e-6:
         if temperature == 0.0:
             # Greedy decoding
-            return logits.argmax(dim=-1, keepdim=True), F.softmax(logits, dim=-1)
+            return logits.argmax(dim=-1).to(torch.int32)
         logits = logits / temperature
 
     # 2. Pre-calculate Softmax only if needed for Min-P
@@ -179,13 +201,7 @@ def sample_token_optimized(
     else:
         sampled_token = sampled_index_in_subset
 
-    # Recover full distribution (only if strictly needed, usually for training/debugging)
-    # Warning: recovering the FULL probability vector is expensive.
-    # In inference, we usually skip this return.
-    # If you MUST return full probs:
-    final_probs = F.softmax(logits, dim=-1)
-
-    return sampled_token, final_probs
+    return sampled_token.squeeze(-1).to(torch.int32)
 
 
 def sample_token_flashinfer(
@@ -210,21 +226,20 @@ def sample_token_flashinfer(
         raise ValueError(
             f"Expected logits with shape [batch, vocab], got {logits.shape}."
         )
+    # logger.info(
+    #     f"Sampling logits shape: {logits.shape}, dtype: {logits.dtype}, device: {logits.device}"
+    # )
     if logits.device.type != "cuda":
-        sampled, _ = sample_token(logits, temperature, top_k, top_p, 0.0)
-        return sampled.squeeze(-1).to(torch.int32)
-    batch_size = logits.shape[0]
+        logger.error("logits is not on CUDA device!")
+        # sampled = sample_token(logits, temperature, top_k, top_p, 0.0)
+        # return sampled.squeeze(-1).to(torch.int32)
 
-    # 1. 预处理 Temperature
-    # FlashInfer 的核心 sampling kernel 通常直接处理 logits，
-    # 建议在传入前应用温度 (Fusion 效果取决于是否使用更高级的 Wrapper，但这样最通用)
-    if abs(temperature - 1.0) > 1e-6:
-        # 注意：如果 temperature == 0，通常由上层逻辑处理为 argmax
-        # 这里为了演示完整性，做一下保护
-        if temperature == 0.0:
-            return torch.argmax(logits, dim=-1).to(torch.int32)
-        logits = logits / temperature
+    # if abs(temperature - 1.0) > 1e-6:
+    #     if temperature == 0.0:
+    #         return torch.argmax(logits, dim=-1).to(torch.int32)
+    #     logits = logits / temperature
 
+    logits = logits / temperature
     vocab_size = logits.shape[-1]
     if top_k <= 0 or top_k > vocab_size:
         top_k = vocab_size
@@ -438,3 +453,81 @@ def simple_generate(
     )
 
     return tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+
+@triton.jit
+def _token_entropy_kernel(
+    logits_ptr,
+    entropy_ptr,
+    vocab_size,
+    temperature,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    row_start = logits_ptr + row_idx * vocab_size
+
+    # Pass 1: Find max
+    max_val = float("-inf")
+    for block_start in range(0, vocab_size, BLOCK_SIZE):
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < vocab_size
+        logits = tl.load(row_start + offsets, mask=mask, other=float("-inf"))
+        scaled = logits / temperature
+        max_val = tl.maximum(max_val, tl.max(scaled, axis=0))
+
+    # Pass 2: Compute sum(exp)
+    sum_exp = 0.0
+    for block_start in range(0, vocab_size, BLOCK_SIZE):
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < vocab_size
+        logits = tl.load(row_start + offsets, mask=mask, other=float("-inf"))
+        scaled = logits / temperature
+        sum_exp += tl.sum(tl.exp(scaled - max_val), axis=0)
+
+    log_sum_exp = tl.log(sum_exp)
+
+    # Pass 3: Compute entropy
+    entropy = 0.0
+    for block_start in range(0, vocab_size, BLOCK_SIZE):
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < vocab_size
+        logits = tl.load(row_start + offsets, mask=mask, other=float("-inf"))
+        scaled = logits / temperature
+
+        shifted = scaled - max_val
+        p = tl.exp(shifted) / sum_exp
+        log_p = shifted - log_sum_exp
+
+        entropy += tl.sum(tl.where(mask, -p * log_p, 0.0), axis=0)
+
+    tl.store(entropy_ptr + row_idx, entropy)
+
+
+def calculate_token_entropy_triton(
+    logits: torch.Tensor, temperature: float = 1.0
+) -> torch.Tensor:
+    squeeze_output = False
+    if logits.dim() == 1:
+        logits = logits.unsqueeze(0)
+        squeeze_output = True
+
+    batch_size, vocab_size = logits.shape
+
+    if temperature == 0.0:
+        entropy = torch.zeros(batch_size, device=logits.device, dtype=logits.dtype)
+        return entropy.squeeze(0) if squeeze_output else entropy
+
+    logits = logits.contiguous()
+    entropy = torch.empty(batch_size, device=logits.device, dtype=logits.dtype)
+
+    BLOCK_SIZE = triton.next_power_of_2(min(vocab_size, 4096))
+
+    _token_entropy_kernel[(batch_size,)](
+        logits,
+        entropy,
+        vocab_size,
+        temperature,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return entropy.squeeze(0) if squeeze_output else entropy

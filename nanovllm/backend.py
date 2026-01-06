@@ -22,6 +22,7 @@ class Backend:
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         # logger.info(f"LLMEngine config: {config_kwargs}")
         config = Config(model, **config_kwargs)
+        self.config = config
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")

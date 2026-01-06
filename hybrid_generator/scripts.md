@@ -40,7 +40,7 @@ python eval_hybrid.py \
     --slm /root/huggingface/Qwen3-1.7B \
     --llm /root/huggingface/Qwen3-8B \
     --strategy entropy \
-    --threshold 0.1 \
+    --threshold 0.5 \
     --report-routing-metrics \
     --apply-chat-template \
     --tasks aime25 \
