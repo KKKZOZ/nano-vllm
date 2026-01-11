@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from datetime import datetime
 from typing import Any
@@ -224,6 +225,72 @@ def _save_entropy_distribution(entropies: list[float], output_path: str) -> None
     plt.close(fig)
 
 
+def _highlight_token(token_text: str) -> str:
+    if not token_text:
+        return "@@"
+    leading_len = len(token_text) - len(token_text.lstrip())
+    trailing_len = len(token_text) - len(token_text.rstrip())
+    core_start = leading_len
+    core_end = len(token_text) - trailing_len
+    if core_end <= core_start:
+        return f"@{token_text}@"
+    leading = token_text[:core_start]
+    core = token_text[core_start:core_end]
+    trailing = token_text[core_end:]
+    return f"{leading}@{core}@{trailing}"
+
+
+def _token_label(token_text: str) -> str:
+    if not token_text:
+        return ""
+    stripped = token_text.strip()
+    return stripped if stripped else token_text
+
+
+def _format_entropy(value: float) -> str:
+    return f"{value:.4f}"
+
+
+def _single_line_text(text: str) -> str:
+    return text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+
+
+def _build_high_entropy_contexts(
+    profiles: list[Any], top_percent: int = 20, window: int = 15
+) -> list[str]:
+    candidates: list[tuple[float, int, int]] = []
+    for profile_idx, profile in enumerate(profiles):
+        for token_idx, token in enumerate(profile.tokens):
+            candidates.append((float(token.entropy), profile_idx, token_idx))
+
+    if not candidates:
+        return []
+
+    top_count = int(math.ceil(len(candidates) * top_percent / 100))
+    top_count = max(1, min(len(candidates), top_count))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    contexts: list[str] = []
+    for entropy, profile_idx, token_idx in candidates[:top_count]:
+        profile = profiles[profile_idx]
+        start = max(0, token_idx - window)
+        end = min(len(profile.tokens), token_idx + window + 1)
+        before_text = "".join(
+            token.token_text for token in profile.tokens[start:token_idx]
+        )
+        token_text = profile.tokens[token_idx].token_text
+        highlighted = _highlight_token(token_text)
+        after_text = "".join(
+            token.token_text for token in profile.tokens[token_idx + 1 : end]
+        )
+        label = _token_label(token_text)
+        prefix = f"[{label}: {_format_entropy(entropy)}] " if label else ""
+        contexts.append(
+            _single_line_text(f"{prefix}{before_text}{highlighted}{after_text}")
+        )
+    return contexts
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Calibrate entropy/uncertainty distribution on dataset prompts."
@@ -343,6 +410,11 @@ def main() -> None:
         action="store_true",
         help="Synchronize CUDA stats for more accurate timing.",
     )
+    parser.add_argument(
+        "--details",
+        action="store_true",
+        help="Save per-token entropy details and high-entropy context snippets.",
+    )
 
     args = parser.parse_args()
 
@@ -398,8 +470,13 @@ def main() -> None:
     calibration_path = os.path.join(output_dir, "calibration.json")
     inference_output_path = os.path.join(output_dir, "inference_outputs.json")
     entropy_plot_path = os.path.join(output_dir, "entropy_distribution.png")
+    token_entropy_path = os.path.join(output_dir, "token_entropies.json")
+    high_entropy_contexts_path = os.path.join(
+        output_dir, "high_entropy_contexts.txt"
+    )
 
     inference_outputs = []
+    token_entropy_outputs = []
     entropies: list[float] = []
     for idx, profile in enumerate(profiles):
         inference_outputs.append(
@@ -412,6 +489,20 @@ def main() -> None:
             }
         )
         entropies.extend([float(token.entropy) for token in profile.tokens])
+        if args.details:
+            token_entropy_outputs.append(
+                {
+                    "index": idx,
+                    "tokens": [
+                        {
+                            "position": token.position,
+                            "token": token.token_text,
+                            "entropy": float(token.entropy),
+                        }
+                        for token in profile.tokens
+                    ],
+                }
+            )
 
     inference_outputs = _round_floats(inference_outputs, 4)
     with open(inference_output_path, "w", encoding="utf-8") as f:
@@ -419,11 +510,25 @@ def main() -> None:
 
     _save_entropy_distribution(entropies, entropy_plot_path)
 
+    if args.details:
+        token_entropy_outputs = _round_floats(token_entropy_outputs, 4)
+        with open(token_entropy_path, "w", encoding="utf-8") as f:
+            json.dump(token_entropy_outputs, f, ensure_ascii=False, indent=2)
+        high_entropy_contexts = _build_high_entropy_contexts(
+            profiles, top_percent=20, window=15
+        )
+        with open(high_entropy_contexts_path, "w", encoding="utf-8") as f:
+            for line in high_entropy_contexts:
+                f.write(f"{line}\n")
+
     with open(calibration_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     print(f"Saved calibration result to: {calibration_path}")
     print(f"Saved inference outputs to: {inference_output_path}")
     print(f"Saved entropy distribution plot to: {entropy_plot_path}")
+    if args.details:
+        print(f"Saved token entropies to: {token_entropy_path}")
+        print(f"Saved high-entropy contexts to: {high_entropy_contexts_path}")
 
     if args.output and args.output != calibration_path:
         with open(args.output, "w", encoding="utf-8") as f:

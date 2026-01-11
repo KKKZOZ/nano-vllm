@@ -313,7 +313,7 @@ def compute_logu(
         return aleatoric_uncertainty, epistemic_uncertainty
 
 
-# @torch.compile()
+# @torch.compile
 def calculate_token_entropy(
     logits: torch.Tensor, temperature: float = 1.0
 ) -> torch.Tensor:

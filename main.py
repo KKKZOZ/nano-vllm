@@ -1,3 +1,4 @@
+import time
 import json
 
 import torch
@@ -100,6 +101,7 @@ def run_hybrid_generation(
         verbose=verbose,
         enable_stats_sync=True,
     )
+    time.sleep(600)
     result, stats = generator.generate(
         prompt=input,
         strategy=strategy,
@@ -185,8 +187,8 @@ if __name__ == "__main__":
         llm,
         "entropy",
         # "semantic_enhanced_route",
-        threshold=0.01,
-        max_new_tokens=10000,
+        threshold=0.2,
+        max_new_tokens=1000,
         verbose=False,
     )
     # profile(input, draft_model, None, 2000)

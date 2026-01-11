@@ -116,6 +116,7 @@ class HybridGenerator:
                 "gpu_memory_utilization": llm_memory_usage,
                 "max_num_seqs": 1,
                 "enable_stats_sync": enable_stats_sync,
+                "max_extend_len": 40,
             }
 
         if slm_model_id is not None:
@@ -136,6 +137,13 @@ class HybridGenerator:
             "entropy": EntropyStrategy(),
             "semantic_enhanced_route": SemanticEnhancedRouteStrategy(),
         }
+        # Warm up
+        BATCH_SIZE = 1
+        VOCAB_SIZE = 151936
+        logits = torch.randn(
+            BATCH_SIZE, VOCAB_SIZE, device=self.device, dtype=self.dtype
+        )
+        calculate_token_entropy(logits, temperature=0.6)
 
     @torch.inference_mode()
     def generate(
@@ -222,14 +230,14 @@ class HybridGenerator:
 
     def _print_stats(self, stats: dict, strategy: str):
         """Print generation statistics in a formatted way."""
-        elapsed = stats["elapsed_time"]
-        speed = stats["total_tokens"] / max(elapsed, 1e-9)
+        decode_time = stats["elapsed_time"]
+        decode_speed = stats["total_tokens"] / max(decode_time, 1e-9)
 
         print(f"\n\n{'=' * 60}")
         print(f"Strategy: {strategy}")
-        print(f"Time taken: {elapsed:.2f}s")
+        print(f"Decode time: {decode_time:.2f}s")
         print(f"Total tokens generated: {stats['total_tokens']}")
-        print(f"Speed: {speed:.2f} tok/s")
+        print(f"Decode speed: {decode_speed:.2f} tok/s")
         print(f"Decode steps: {stats['decode_steps']}")
 
         if strategy == "speculative":
@@ -409,9 +417,7 @@ class HybridGenerator:
                 generated_ids, skip_special_tokens=True
             )
         else:
-            prompt_text = self.tokenizer.decode(
-                prompt_ids, skip_special_tokens=True
-            )
+            prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=True)
             profile.generated_text = prompt_text + stop_text
         profile.total_time = end_time - start_time
         profile.stats = {

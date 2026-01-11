@@ -50,6 +50,7 @@ class Backend:
             "prefill": {"num_tokens": [], "times": []},
             "extend": {"num_tokens": [], "times": []},
             "decode": {"num_tokens": [], "times": []},
+            "operation_sequence": [],
         }
 
     def exit(self):
@@ -107,6 +108,8 @@ class Backend:
         elapsed_time = time.perf_counter() - start_time
         self.stats[phase]["num_tokens"].append(num_tokens)
         self.stats[phase]["times"].append(elapsed_time)
+        if phase in {"extend", "decode"}:
+            self.stats["operation_sequence"].append((phase, num_tokens))
 
         return logits
 
@@ -167,7 +170,6 @@ class Backend:
                     "total": round4(np.sum(times_array_ms)),
                 },
             }
-
             # Add throughput for convenience
             if report[phase]["times"]["mean"] > 0:
                 report[phase]["throughput"] = {
@@ -176,6 +178,10 @@ class Backend:
                         / (report[phase]["times"]["mean"] / 1000.0)
                     ),
                 }
+
+        report["operation_sequence"] = " ".join(
+            str(int(count)) for _, count in self.stats["operation_sequence"]
+        )
 
         return report
 
@@ -220,6 +226,8 @@ class Backend:
                     )
 
         print("=" * 80 + "\n")
+        if stats.get("operation_sequence"):
+            print(f"Operation sequence: {stats['operation_sequence']}")
 
     def generate_v0(
         self,
