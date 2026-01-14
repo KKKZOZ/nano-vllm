@@ -1,4 +1,3 @@
-import time
 import json
 
 import torch
@@ -8,6 +7,7 @@ from transformers import AutoTokenizer
 #     simple_generate,
 # )
 from hybrid_generator import HybridGenerator
+from hybrid_generator.backends import BackendId
 
 input = "Let $O(0,0), A(\\tfrac{1}{2}, 0),$ and $B(0, \\tfrac{\\sqrt{3}}{2})$ be points in the coordinate plane. Let $\\mathcal{F}$ be the family of segments $\\overline{PQ}$ of unit length lying in the first quadrant with $P$ on the $x$-axis and $Q$ on the $y$-axis. There is a unique point $C$ on $\\overline{AB}$, distinct from $A$ and $B$, that does not belong to any segment from $\\mathcal{F}$ other than $\\overline{AB}$. Then $OC^2 = \\tfrac{p}{q}$, where $p$ and $q$ are relatively prime positive integers. Find $p + q$."
 # input = "write a simple calculator in python"
@@ -32,53 +32,6 @@ input = tokenizer.apply_chat_template(
 
 # result = simple_generate("/root/huggingface/Qwen3-8B", input, max_new_tokens=1000)
 
-# pipe = pipeline(
-#     "text-generation",
-#     model="/root/huggingface/Qwen3-8B",
-#     torch_dtype=torch.float16,
-#     device_map="auto",  # 自动分配 GPU
-# )
-
-# # 直接调用
-# sequences = pipe(
-#     "Hello, how are you?",
-#     do_sample=True,
-#     top_k=10,
-#     num_return_sequences=1,
-#     eos_token_id=pipe.tokenizer.eos_token_id,
-#     max_length=1000,
-# )
-
-# for seq in sequences:
-#     print(f"Result: {seq['generated_text']}")
-
-# result = simple_generate_with_kv_cache_hf(model, input, max_new_tokens=20000)
-# print(result)
-
-# Greedy decoding (original version)
-# print("Speculative decoding with greedy...")
-# result = speculative_generate_with_kv_cache_hf(
-#     draft_model_id=draft_model,
-#     target_model_id=model,
-#     prompt=input,
-#     num_drafts=4,
-#     max_new_tokens=1000,
-# )
-
-# # Sampling version with temperature, top-k, top-p, min-p
-# print("Speculative decoding with sampling...")
-# result = speculative_generate_with_sampling(
-#     draft_model_id=draft_model,
-#     target_model_id=model,
-#     prompt=input,
-#     num_drafts=4,
-#     max_new_tokens=1000,
-#     temperature=0.6,
-#     top_k=20,
-#     top_p=0.95,
-#     min_p=0.0,
-# )
-
 
 def run_hybrid_generation(
     prompt,
@@ -90,6 +43,7 @@ def run_hybrid_generation(
     threshold=0.1,
     max_new_tokens=1000,
     verbose=False,
+    backend_id=None,
 ):
     generator = HybridGenerator(
         slm_model_id=draft_model,
@@ -101,9 +55,8 @@ def run_hybrid_generation(
         verbose=verbose,
         enable_stats_sync=True,
     )
-    time.sleep(600)
     result, stats = generator.generate(
-        prompt=input,
+        prompt=prompt,
         strategy=strategy,
         max_new_tokens=max_new_tokens,
         temperature=0.6,
@@ -111,10 +64,33 @@ def run_hybrid_generation(
         top_p=0.95,
         min_p=0.0,
         threshold=threshold,
+        backend_id=backend_id,
     )
-    # print(f"Statatics: {stats}")
+    print(f"Statatics: {json.dumps(stats, indent=2, ensure_ascii=False)}")
 
     engine_stats = generator.report_backend_stats()
+    # Count badly_1 (number of 1s in operation_sequence) for llm_stats
+    if (
+        "llm_stats" in engine_stats
+        and "operation_sequence" in engine_stats["llm_stats"]
+    ):
+        op_seq = engine_stats["llm_stats"]["operation_sequence"]
+        engine_stats["llm_stats"]["badly_1"] = op_seq.count("1")
+        # Split into 5 chunks and calculate LLM ratio for each
+        n = len(op_seq)
+        chunk_size = n // 5
+        llm_ratios = []
+        for i in range(5):
+            start = i * chunk_size
+            end = (i + 1) * chunk_size if i < 4 else n  # Last chunk takes remainder
+            chunk = op_seq[start:end]
+            ratio = chunk.count("1") / len(chunk) if chunk else 0
+            llm_ratios.append(round(ratio, 4))
+        engine_stats["llm_stats"]["llm_ratio_by_chunk"] = llm_ratios
+    # Remove verbose fields from slm_stats before printing
+    if "slm_stats" in engine_stats:
+        engine_stats["slm_stats"].pop("extend", None)
+        engine_stats["slm_stats"].pop("operation_sequence", None)
     # print(f"Engine Backend Statistics: {engine_stats}")
     print(
         f"Engine Backend Statistics:\n{json.dumps(engine_stats, indent=2, ensure_ascii=False)}"
@@ -134,7 +110,7 @@ def profile(prompt, draft_model, model, max_new_tokens=10000):
     )
 
     profile = generator.generate_with_profile(
-        prompt=input,
+        prompt=prompt,
         max_new_tokens=max_new_tokens,
     )
 
@@ -181,15 +157,27 @@ def simple_generate(prompt, draft_model, max_new_tokens=1000):
 
 
 if __name__ == "__main__":
+    # run_hybrid_generation(
+    #     input,
+    #     slm,
+    #     llm,
+    #     "entropy",
+    #     # "semantic_enhanced_route",
+    #     threshold=0.2,
+    #     max_new_tokens=10000,
+    #     verbose=False,
+    # )
+
     run_hybrid_generation(
         input,
         slm,
         llm,
-        "entropy",
+        "solo",
         # "semantic_enhanced_route",
         threshold=0.2,
-        max_new_tokens=1000,
+        max_new_tokens=10000,
         verbose=False,
+        backend_id=BackendId.SLM,
     )
     # profile(input, draft_model, None, 2000)
     # simple_generate(input, draft_model, 2000)

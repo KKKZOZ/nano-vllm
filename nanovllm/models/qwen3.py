@@ -1,6 +1,7 @@
 import torch
 import torch.distributed as dist
 from torch import nn
+from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
@@ -12,7 +13,6 @@ from nanovllm.layers.linear import (
     RowParallelLinear,
 )
 from nanovllm.layers.rotary_embedding import get_rope
-from transformers import Qwen3Config
 
 
 class Qwen3Attention(nn.Module):

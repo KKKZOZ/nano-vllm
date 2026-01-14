@@ -77,7 +77,7 @@ class Attention(nn.Module):
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
 
-        # Use flash_attn_varlen_func only for true prefill (not extend)
+        # Use flash_attn_varlen_func only for prefill
         if context.is_prefill and not context.is_extend:
             if context.block_tables is not None:  # prefix cache
                 k, v = k_cache, v_cache

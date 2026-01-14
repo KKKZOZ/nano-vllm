@@ -13,9 +13,8 @@ import torch
 import torch.nn.functional as F
 from lm_eval.api.model import LM
 from lm_eval.api.registry import register_model
-from transformers.cache_utils import DynamicCache
-
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.cache_utils import DynamicCache
 
 from .generator import HybridGenerator
 

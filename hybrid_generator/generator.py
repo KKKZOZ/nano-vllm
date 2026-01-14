@@ -19,6 +19,7 @@ from hybrid_generator.profiling import ProfileResult
 from hybrid_generator.strategies import (
     EntropyStrategy,
     SemanticEnhancedRouteStrategy,
+    SoloStrategy,
     SpeculativeStrategy,
     calculate_token_entropy,
     compute_logu,
@@ -136,6 +137,7 @@ class HybridGenerator:
             # "uncertainty": UncertaintyStrategy(),
             "entropy": EntropyStrategy(),
             "semantic_enhanced_route": SemanticEnhancedRouteStrategy(),
+            "solo": SoloStrategy(),  # solo behaves like speculative with LLM only
         }
         # Warm up
         BATCH_SIZE = 1
@@ -154,6 +156,7 @@ class HybridGenerator:
             "uncertainty",
             "entropy",
             "semantic_enhanced_route",
+            "solo",
         ] = "entropy",
         max_new_tokens: int = 2000,
         # Sampling parameters
@@ -164,6 +167,7 @@ class HybridGenerator:
         # Strategy-specific parameters
         num_drafts: int = 4,  # for speculative
         threshold: float = 0.5,  # for uncertainty and entropy
+        backend_id=None,
     ) -> tuple[str, dict]:
         """
         Generate text using the specified strategy.
@@ -221,6 +225,7 @@ class HybridGenerator:
             verbose=self.verbose,
             report_live_metrics=self.report_live_metrics,
             enable_stats_sync=self.enable_stats_sync,
+            backend_id=backend_id,
         )
 
         # Print statistics

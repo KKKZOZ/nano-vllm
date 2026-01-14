@@ -2,6 +2,7 @@ from .base import GenerationStrategy
 from .metrics import LiveMetricsTracker
 from .route import EntropyStrategy
 from .semantic_enhanced_route import SemanticEnhancedRouteStrategy
+from .solo import SoloStrategy
 from .speculative import SpeculativeStrategy
 from .utils import (
     calculate_token_entropy,
@@ -18,4 +19,5 @@ __all__ = [
     "SpeculativeStrategy",
     "EntropyStrategy",
     "SemanticEnhancedRouteStrategy",
+    "SoloStrategy",
 ]
