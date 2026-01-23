@@ -7,11 +7,22 @@ from nanovllm.sampling_params import SamplingParams
 
 
 class NanovLLMBackend(ModelBackend):
-    def __init__(self, model: str | None = None, *, backend: Backend | None = None, **kwargs):
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        backend: Backend | None = None,
+        device: torch.device | str | int | None = None,
+        **kwargs,
+    ):
+        super().__init__(device)
         if backend is None:
             if model is None:
                 raise ValueError("NanovLLMBackend requires a model or a backend.")
-            self.backend = Backend(model, **kwargs)
+            if self.device.type != "cuda":
+                raise ValueError("NanovLLMBackend only supports CUDA devices.")
+            device_index = 0 if self.device.index is None else self.device.index
+            self.backend = Backend(model, device=device_index, **kwargs)
         else:
             self.backend = backend
 

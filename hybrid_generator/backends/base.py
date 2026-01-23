@@ -8,6 +8,19 @@ class ModelBackend(ABC):
     Abstract base class for model inference backends.
     """
 
+    def __init__(self, device: torch.device | str | int | None = None):
+        self.device = self._normalize_device(device)
+
+    @staticmethod
+    def _normalize_device(device: torch.device | str | int | None) -> torch.device:
+        if device is None:
+            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if isinstance(device, torch.device):
+            return device
+        if isinstance(device, int):
+            return torch.device("cuda", device)
+        return torch.device(device)
+
     @abstractmethod
     def forward(self, seq_id: int, token_ids: list[int]) -> torch.Tensor:
         """

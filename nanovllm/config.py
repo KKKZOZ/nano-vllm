@@ -9,6 +9,7 @@ from nanovllm.utils.logger import logger
 @dataclass
 class Config:
     model: str
+    device: int | None = None
     max_num_batched_tokens: int = 40960
     max_num_seqs: int = 512
     max_model_len: int = 40960
@@ -25,6 +26,7 @@ class Config:
     def __post_init__(self):
         logger.info("GPU Memory Utilization: %.2f", self.gpu_memory_utilization)
         assert os.path.isdir(self.model)
+        assert self.device is None or self.device >= 0
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)

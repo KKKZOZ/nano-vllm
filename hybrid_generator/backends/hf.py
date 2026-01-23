@@ -8,12 +8,22 @@ from hybrid_generator.backends.base import ModelBackend
 
 
 class HFBackend(ModelBackend):
-    def __init__(self, model_path: str, device: str = "cuda", dtype=torch.bfloat16):
-        self.device = device
-        print(f"Loading model {model_path} to {device}...")
+    def __init__(
+        self,
+        model_path: str,
+        device: torch.device | str | int | None = None,
+        dtype=torch.bfloat16,
+    ):
+        super().__init__(device)
+        device_str = str(self.device)
+        print(f"Loading model {model_path} to {device_str}...")
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_path, torch_dtype=dtype, device_map=device, trust_remote_code=True
+            model_path,
+            torch_dtype=dtype,
+            device_map={"": device_str},
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2",
         )
         self.model.eval()
 
@@ -50,3 +60,18 @@ class HFBackend(ModelBackend):
 
     def report_stats(self) -> dict:
         return {}
+
+    def exit(self):
+        """Release all resources and clear GPU memory."""
+        # Clear all caches
+        self.cache_map.clear()
+
+        # Delete model
+        if hasattr(self, "model"):
+            del self.model
+
+        # Clear CUDA cache if using CUDA
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            # Synchronize to ensure cleanup is complete
+            torch.cuda.synchronize(self.device)

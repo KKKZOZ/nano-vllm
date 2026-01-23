@@ -16,10 +16,13 @@ from nanovllm.utils.logger import logger
 
 
 class Backend:
-    def __init__(self, model, **kwargs):
+    def __init__(self, model, device: int | str | torch.device | None = None, **kwargs):
         self.enable_stats_sync = kwargs.pop("enable_stats_sync", False)
+        device_index = self._normalize_device_index(device)
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
+        if device_index is not None:
+            config_kwargs["device"] = device_index
         # logger.info(f"LLMEngine config: {config_kwargs}")
         config = Config(model, **config_kwargs)
         self.config = config
@@ -52,6 +55,19 @@ class Backend:
             "decode": {"num_tokens": [], "times": []},
             "operation_sequence": [],
         }
+
+    @staticmethod
+    def _normalize_device_index(device: int | str | torch.device | None) -> int | None:
+        if device is None:
+            return None
+        if isinstance(device, int):
+            if device < 0:
+                raise ValueError("device index must be non-negative.")
+            return device
+        dev = torch.device(device)
+        if dev.type != "cuda":
+            raise ValueError("nanovllm Backend only supports CUDA devices.")
+        return 0 if dev.index is None else dev.index
 
     def exit(self):
         if hasattr(self, "model_runner"):

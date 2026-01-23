@@ -35,7 +35,9 @@ class ModelRunner:
                 world_size=self.world_size,
                 rank=rank,
             )
-        torch.cuda.set_device(rank)
+        base_device = 0 if config.device is None else config.device
+        device_index = base_device + rank
+        torch.cuda.set_device(device_index)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")

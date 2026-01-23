@@ -3,7 +3,6 @@ import time
 from typing import Tuple, cast
 
 import torch
-import torch.nn.functional as F
 
 from hybrid_generator.backends import BackendId, HybridBackend
 from hybrid_generator.strategies.base import GenerationStrategy
@@ -14,7 +13,6 @@ from hybrid_generator.strategies.utils import (
 )
 
 
-# TODO: refactor to RouteStrategy base class
 class EntropyStrategy(GenerationStrategy):
     """
     Entropy-based routing strategy adapted for HybridBackend.
@@ -85,24 +83,6 @@ class EntropyStrategy(GenerationStrategy):
         slm_tokens = 0
         llm_tokens = 0
         decode_steps = 0
-        slm_llm_top1_set_equal = 0
-        slm_llm_top2_set_equal = 0
-        slm_llm_top3_set_equal = 0
-        slm_llm_top1_exact = 0
-        slm_llm_top2_exact = 0
-        slm_llm_top3_exact = 0
-        # Cumulative probability tracking for set_equal cases
-        top2_set_equal_slm_cumprob = []
-        top2_set_equal_llm_cumprob = []
-        top3_set_equal_slm_cumprob = []
-        top3_set_equal_llm_cumprob = []
-        # Top-p sampling pool statistics
-        topp_pool_set_equal = 0
-        topp_pool_set_equal_slm_cumprob = []
-        topp_pool_set_equal_llm_cumprob = []
-        topp_pool_set_equal_sizes = []  # Size of the pool when equal
-        all_slm_topp_pool_sizes = []  # All SLM pool sizes
-        all_llm_topp_pool_sizes = []  # All LLM pool sizes
 
         # Helper to print/track
         def _process_token(next_token_id, model_used, entropy_val, uncertainty_val):
@@ -161,18 +141,6 @@ class EntropyStrategy(GenerationStrategy):
             else:
                 # === LLM Generation Branch ===
 
-                # 0. Compare SLM/LLM top-k token sets (no sampling)
-                # Get top-1, top-2, and top-3 tokens from SLM
-                compare_k = min(3, current_slm_logits.numel())
-                slm_top_ids = torch.topk(
-                    current_slm_logits, k=compare_k
-                ).indices.tolist()
-                slm_top1_id = slm_top_ids[0] if len(slm_top_ids) >= 1 else None
-                slm_top2_ids_set = set(slm_top_ids[:2]) if len(slm_top_ids) >= 2 else set()
-                slm_top3_ids_set = set(slm_top_ids[:3])
-
-                llm_next_logits = None
-
                 # 1. LLM Catch-up
                 # If SLM generated tokens while LLM was sleeping, feed them now.
                 catchup_tokens = generated_ids[llm_synced_len:]
@@ -195,7 +163,6 @@ class EntropyStrategy(GenerationStrategy):
 
                 # 2. LLM Consecutive Generation
                 hit_eos = False
-                compare_first_token = True
                 for _ in range(llm_consecutive_tokens):
                     if len(generated_ids) - prompt_len >= max_new_tokens:
                         break
@@ -210,96 +177,11 @@ class EntropyStrategy(GenerationStrategy):
                         )[-1, :]
                         llm_synced_len += 1
 
-                    if compare_first_token:
-                        compare_k = min(3, llm_next_logits.numel())
-                        llm_top_ids = torch.topk(
-                            llm_next_logits, k=compare_k
-                        ).indices.tolist()
-
-                        # Compute probability distributions (for cumulative probability calculation)
-                        slm_probs = F.softmax(current_slm_logits / temperature, dim=-1)
-                        llm_probs = F.softmax(llm_next_logits / temperature, dim=-1)
-
-                        # Get top-p sampling pools
-                        def get_topp_pool(probs, p=0.95):
-                            """Get the set of token indices in the top-p sampling pool."""
-                            sorted_probs, sorted_indices = torch.sort(
-                                probs, descending=True
-                            )
-                            cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
-                            # Find tokens within top-p threshold
-                            mask = cumsum_probs <= p
-                            # Always include at least the top token
-                            if not mask.any():
-                                mask[0] = True
-                            # Include one more token to reach p (the one that crosses the threshold)
-                            else:
-                                cutoff_idx = mask.sum().item()
-                                if cutoff_idx < len(mask):
-                                    mask[cutoff_idx] = True
-                            selected_indices = sorted_indices[mask]
-                            return set(selected_indices.tolist())
-
-                        slm_topp_pool = get_topp_pool(slm_probs, top_p)
-                        llm_topp_pool = get_topp_pool(llm_probs, top_p)
-
-                        # Record pool sizes for all comparisons
-                        all_slm_topp_pool_sizes.append(len(slm_topp_pool))
-                        all_llm_topp_pool_sizes.append(len(llm_topp_pool))
-
-                        # Compare top-1
-                        llm_top1_id = llm_top_ids[0] if len(llm_top_ids) >= 1 else None
-                        if slm_top1_id is not None and llm_top1_id == slm_top1_id:
-                            slm_llm_top1_set_equal += 1
-                            slm_llm_top1_exact += 1  # top-1: set_equal = exact
-
-                        # Compare top-2 (set_equal: same set, exact: same order)
-                        llm_top2_ids_set = set(llm_top_ids[:2]) if len(llm_top_ids) >= 2 else set()
-                        # Set equal: compare sets (unordered)
-                        if slm_top2_ids_set and slm_top2_ids_set == llm_top2_ids_set:
-                            slm_llm_top2_set_equal += 1
-                            # Calculate cumulative probability for top-2
-                            slm_cumprob = sum(slm_probs[idx].item() for idx in slm_top_ids[:2])
-                            llm_cumprob = sum(llm_probs[idx].item() for idx in llm_top_ids[:2])
-                            top2_set_equal_slm_cumprob.append(slm_cumprob)
-                            top2_set_equal_llm_cumprob.append(llm_cumprob)
-                        # Exact: compare as ordered lists
-                        if len(slm_top_ids) >= 2 and len(llm_top_ids) >= 2:
-                            if slm_top_ids[:2] == llm_top_ids[:2]:
-                                slm_llm_top2_exact += 1
-
-                        # Compare top-3 (set_equal: same set, exact: same order)
-                        llm_top3_ids_set = set(llm_top_ids[:3])
-                        # Set equal: compare sets (unordered)
-                        if slm_top3_ids_set == llm_top3_ids_set:
-                            slm_llm_top3_set_equal += 1
-                            # Calculate cumulative probability for top-3
-                            slm_cumprob = sum(slm_probs[idx].item() for idx in slm_top_ids[:3])
-                            llm_cumprob = sum(llm_probs[idx].item() for idx in llm_top_ids[:3])
-                            top3_set_equal_slm_cumprob.append(slm_cumprob)
-                            top3_set_equal_llm_cumprob.append(llm_cumprob)
-                        # Exact: compare as ordered lists
-                        if len(slm_top_ids) >= 3 and len(llm_top_ids) >= 3:
-                            if slm_top_ids[:3] == llm_top_ids[:3]:
-                                slm_llm_top3_exact += 1
-
-                        # Compare top-p sampling pools
-                        if slm_topp_pool == llm_topp_pool:
-                            topp_pool_set_equal += 1
-                            # Record pool size when equal
-                            topp_pool_set_equal_sizes.append(len(slm_topp_pool))
-                            # Calculate cumulative probability for the shared pool
-                            slm_cumprob = sum(slm_probs[idx].item() for idx in slm_topp_pool)
-                            llm_cumprob = sum(llm_probs[idx].item() for idx in llm_topp_pool)
-                            topp_pool_set_equal_slm_cumprob.append(slm_cumprob)
-                            topp_pool_set_equal_llm_cumprob.append(llm_cumprob)
-
                     # Sample
                     next_token_tensor = sample_token_flashinfer(
                         llm_next_logits.unsqueeze(0), temperature, top_k, top_p
                     )
                     next_token_id = next_token_tensor.item()
-                    compare_first_token = False
                     llm_tokens += 1
                     generated_ids.append(next_token_id)
 
@@ -339,80 +221,12 @@ class EntropyStrategy(GenerationStrategy):
             torch.cuda.synchronize()
         end_time = time.time()
 
-        # Calculate average cumulative probabilities for set_equal cases
-        def calc_avg(lst):
-            return sum(lst) / len(lst) if lst else 0.0
-
         # Statistics
         stats = {
             "total_tokens": len(generated_ids) - prompt_len,
             "slm_tokens": slm_tokens,
             "llm_tokens": llm_tokens,
             "decode_steps": decode_steps,
-            "slm_llm_top1_set_equal": slm_llm_top1_set_equal,
-            "slm_llm_top2_set_equal": slm_llm_top2_set_equal,
-            "slm_llm_top3_set_equal": slm_llm_top3_set_equal,
-            "slm_llm_top1_exact": slm_llm_top1_exact,
-            "slm_llm_top2_exact": slm_llm_top2_exact,
-            "slm_llm_top3_exact": slm_llm_top3_exact,
-            "top2_set_equal_avg_cumprob": {
-                "slm": round(calc_avg(top2_set_equal_slm_cumprob), 4),
-                "llm": round(calc_avg(top2_set_equal_llm_cumprob), 4),
-                "min": round(
-                    calc_avg(
-                        [
-                            min(s, l)
-                            for s, l in zip(
-                                top2_set_equal_slm_cumprob, top2_set_equal_llm_cumprob
-                            )
-                        ]
-                    ),
-                    4,
-                )
-                if top2_set_equal_slm_cumprob
-                else 0.0,
-            },
-            "top3_set_equal_avg_cumprob": {
-                "slm": round(calc_avg(top3_set_equal_slm_cumprob), 4),
-                "llm": round(calc_avg(top3_set_equal_llm_cumprob), 4),
-                "min": round(
-                    calc_avg(
-                        [
-                            min(s, l)
-                            for s, l in zip(
-                                top3_set_equal_slm_cumprob, top3_set_equal_llm_cumprob
-                            )
-                        ]
-                    ),
-                    4,
-                )
-                if top3_set_equal_slm_cumprob
-                else 0.0,
-            },
-            "topp_pool_set_equal": topp_pool_set_equal,
-            "topp_pool_set_equal_avg_cumprob": {
-                "slm": round(calc_avg(topp_pool_set_equal_slm_cumprob), 4),
-                "llm": round(calc_avg(topp_pool_set_equal_llm_cumprob), 4),
-                "min": round(
-                    calc_avg(
-                        [
-                            min(s, l)
-                            for s, l in zip(
-                                topp_pool_set_equal_slm_cumprob,
-                                topp_pool_set_equal_llm_cumprob,
-                            )
-                        ]
-                    ),
-                    4,
-                )
-                if topp_pool_set_equal_slm_cumprob
-                else 0.0,
-            },
-            "topp_pool_sizes": {
-                "slm_avg": round(calc_avg(all_slm_topp_pool_sizes), 2),
-                "llm_avg": round(calc_avg(all_llm_topp_pool_sizes), 2),
-                "when_equal_avg": round(calc_avg(topp_pool_set_equal_sizes), 2),
-            },
             "elapsed_time": end_time - start_time,
             "threshold": threshold,
             "llm_consecutive_tokens": llm_consecutive_tokens,
