@@ -1,3 +1,4 @@
+import os
 import json
 
 import torch
@@ -11,8 +12,8 @@ from hybrid_generator.backends import BackendId
 
 input = "Let $O(0,0), A(\\tfrac{1}{2}, 0),$ and $B(0, \\tfrac{\\sqrt{3}}{2})$ be points in the coordinate plane. Let $\\mathcal{F}$ be the family of segments $\\overline{PQ}$ of unit length lying in the first quadrant with $P$ on the $x$-axis and $Q$ on the $y$-axis. There is a unique point $C$ on $\\overline{AB}$, distinct from $A$ and $B$, that does not belong to any segment from $\\mathcal{F}$ other than $\\overline{AB}$. Then $OC^2 = \\tfrac{p}{q}$, where $p$ and $q$ are relatively prime positive integers. Find $p + q$."
 # input = "write a simple calculator in python"
-llm = "/root/huggingface/Qwen3-8B"
-slm = "/root/huggingface/Qwen3-1.7B"
+llm = os.path.expanduser("~/huggingface/Qwen3-8B")
+slm = os.path.expanduser("~/huggingface/Qwen3-1.7B")
 
 messages = [
     {"role": "system", "content": "You are a helpful assistant."},
@@ -157,28 +158,28 @@ def simple_generate(prompt, draft_model, max_new_tokens=1000):
 
 
 if __name__ == "__main__":
-    # run_hybrid_generation(
-    #     input,
-    #     slm,
-    #     llm,
-    #     "entropy",
-    #     # "semantic_enhanced_route",
-    #     threshold=0.2,
-    #     max_new_tokens=10000,
-    #     verbose=False,
-    # )
-
     run_hybrid_generation(
         input,
         slm,
         llm,
-        "solo",
+        "entropy",
         # "semantic_enhanced_route",
         threshold=0.2,
-        max_new_tokens=10000,
+        max_new_tokens=1000,
         verbose=False,
-        backend_id=BackendId.SLM,
     )
+
+    # run_hybrid_generation(
+    #     input,
+    #     slm,
+    #     llm,
+    #     "solo",
+    #     # "semantic_enhanced_route",
+    #     threshold=0.2,
+    #     max_new_tokens=10000,
+    #     verbose=False,
+    #     backend_id=BackendId.SLM,
+    # )
     # profile(input, draft_model, None, 2000)
     # simple_generate(input, draft_model, 2000)
     print("OK")
